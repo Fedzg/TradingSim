@@ -21,6 +21,11 @@ docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps \
   --user 10001:10001 --entrypoint codex worker login --device-auth
 ```
 
+Se la rete della VM usa un proxy con una CA privata, usa il certificato
+pubblico verificato del proxy durante la build con
+`docker build --secret id=build-ca,src=/percorso/ca.pem -t tradingsim-worker -f deploy/Dockerfile .`.
+Il certificato di build non viene aggiunto all'immagine.
+
 Completa il login sulla pagina indicata dal CLI. Verifica la possibilità di una
 risposta headless e poi verifica l'accesso Alpaca Paper senza inviare ordini.
 
