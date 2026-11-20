@@ -1,5 +1,5 @@
 import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAnalysis } from "./agents";
-import { type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
+import { FakeBroker, type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
 import { enqueue } from "./chat";
 import { miniChart, type Market, type News, type Series } from "./market";
 import { limitFor, risk, stops, terminal, ticketFor, trading } from "./risk";
@@ -8,14 +8,14 @@ import { missed, nextWake, type Wake } from "./time";
 
 type Inputs = { state: State; broker: Broker; agents: Agents; market: Market; redact: (s: string) => string };
 
-function observed(order: BrokerOrder) {
+function observed(order: BrokerOrder, brokerLabel: string) {
   const filled = Number(order.filled_qty);
   const status = new Map([
     ["new", "nuovo"], ["accepted", "accettato"], ["pending_new", "in attesa di accettazione"], ["filled", "eseguito"],
     ["partially_filled", "eseguito in parte"], ["canceled", "annullato"], ["rejected", "respinto"], ["expired", "scaduto"],
     ["done_for_day", "terminato per oggi"], ["pending_cancel", "annullamento in corso"], ["replaced", "sostituito"],
-  ]).get(order.status) ?? `stato Alpaca ${order.status}`;
-  return `${order.client_order_id}: ${status} da Alpaca, eseguite ${Number.isFinite(filled) ? filled : "quantità non verificabile"}/${order.qty}.`;
+  ]).get(order.status) ?? `stato ${order.status}`;
+  return `${order.client_order_id}: ${status} (${brokerLabel}), eseguite ${Number.isFinite(filled) ? filled : "quantità non verificabile"}/${order.qty}.`;
 }
 
 export async function run({ state, broker, agents, market, redact }: Inputs, entry: Wake, force: boolean, now = new Date()) {
@@ -25,7 +25,9 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
 
   const lock: RunLock = { wake: entry, pid: process.pid, startedAt: now.toISOString(), intents: [] };
   const alerts: string[] = [];
-  const lines: string[] = [];
+  const simulated = broker instanceof FakeBroker;
+  const brokerLabel = simulated ? "broker finto" : "Alpaca Paper";
+  const lines: string[] = simulated ? ["SIMULAZIONE OFFLINE. Dati, ordini e consegne finti."] : [];
   const pending = new Set<string>();
   const unresolved = new Set<string>();
   const uncertainSymbols = new Set<string>();
@@ -52,7 +54,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
       if (order) {
         await state.write(`intents/${intent.id}.json`, { ...intent, observed: order });
         confirmed.set(intent.id, order);
-        note(observed(order));
+        note(observed(order, brokerLabel));
         if (interrupted?.intents.includes(intent.id) || !intent.observed) recoveredSides.add(`${order.symbol}/${order.side}`);
         if (!terminal.has(order.status)) pending.add(intent.id);
         return;
@@ -86,7 +88,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     if (uncertainSymbols.has(order.symbol) || (order.side === "buy" && unresolved.size)) return reject("Invio precedente ancora da riconciliare.");
     try {
       const already = await broker.find(id);
-      if (already) return note(observed(already));
+      if (already) return note(observed(already, brokerLabel));
       const current = await broker.snapshot();
       const visible = new Set(current.orders.map(item => item.client_order_id));
       for (const [knownId, item] of confirmed) {
@@ -119,7 +121,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
       if (result.client_order_id !== id) throw new Error("ID inatteso nella risposta di Alpaca.");
       await state.write(`intents/${id}.json`, { ...intent, observed: result });
       confirmed.set(id, result);
-      note(observed(result));
+      note(observed(result, brokerLabel));
       if (!terminal.has(result.status)) pending.add(id);
     } catch (error) {
       alerts.push(`Risposta all’invio ${id}: ${errorText(error)}`);
@@ -217,9 +219,9 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
   if (snapshot) {
     try { snapshot = await broker.snapshot(); }
     catch (error) { alerts.push(`Dati finali del conto indisponibili: ${errorText(error)}. Riporto lo snapshot iniziale.`); }
-    note(`Conto: USD ${snapshot.account.equity}. P&L del giorno: USD ${(Number(snapshot.account.equity) - Number(snapshot.account.last_equity)).toFixed(2)}. Orologio Alpaca: ${snapshot.clock.timestamp}.`);
+    note(`Conto: USD ${snapshot.account.equity}. P&L del giorno: USD ${(Number(snapshot.account.equity) - Number(snapshot.account.last_equity)).toFixed(2)}. Orologio (${brokerLabel}): ${snapshot.clock.timestamp}.`);
     for (const order of snapshot.orders.filter(x => lock.intents.includes(x.client_order_id))) {
-      const status = observed(order);
+      const status = observed(order, brokerLabel);
       if (!lines.includes(status)) note(status);
       if (terminal.has(order.status)) pending.delete(order.client_order_id);
     }
