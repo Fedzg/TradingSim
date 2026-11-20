@@ -2,6 +2,7 @@ import { chown, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Proposal } from "./broker";
+import type { News } from "./market";
 
 const s = { type: "string" };
 const qty = { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
@@ -92,11 +93,16 @@ export async function reviewOrder(agents: Agents, ticket: string, context: unkno
 
 export class FakeAgents implements Agents {
   constructor(private decision: Decision = { orders: [{ symbol: "SPY", side: "buy", qty: 2, reason: "Trend di prova." }], reasoning: "Il trend simulato è stabile. I volumi sono regolari. Il rischio è contenuto.", planNext: "Ricontrollare SPY e le fonti." }) {}
-  async invoke(role: Role) {
+  async invoke(role: Role, input?: unknown) {
     const reply = { timing: "Trend ora stabile.", invalidation: "Rottura del supporto.", sizing: "Quantità ridotta.", downside: "Monitorare lo stop." };
     switch (role) {
       case "charts": return { ideas: ["SPY", "USOIL", "GBP/USD"].map(symbol => ({ symbol, horizon: "Giornaliero", direction: "Laterale", evidence: "Candele finte", invalidation: "Rottura del range", uncertainty: "Alta" })), limitations: [] };
-      case "news": return { events: [], limitations: [], newMarkets: [] };
+      case "news": {
+        const articles = (input as { news?: News } | undefined)?.news?.articles ?? [];
+        return { events: articles.map(article => ({ title: article.title, source: article.source, link: article.link,
+          published: article.published, symbols: article.symbols, impact: "Impatto macro simulato.", classification: "interpretazione" })),
+          limitations: [], newMarkets: [] };
+      }
       case "decide": return this.decision;
       case "challenge": return reply;
       case "answer": return { ...reply, position: "confermo" };

@@ -98,3 +98,14 @@ export class Market {
     }));
   }
 }
+
+export function miniChart(series: Series, interval: string) {
+  const closes = series.intervals[interval]?.slice(-24).map(bar => bar.c).filter(Number.isFinite) ?? [];
+  if (closes.length < 2) return;
+  const low = Math.min(...closes);
+  const high = Math.max(...closes);
+  const glyphs = "▁▂▃▄▅▆▇█";
+  const graph = closes.map(price => glyphs[high === low ? 3 : Math.round(7 * (price - low) / (high - low))]).join("");
+  const show = (number: number) => number.toLocaleString("it-IT", { maximumFractionDigits: 4 });
+  return `${interval} ${graph} (min ${show(low)}, max ${show(high)}, ultimo ${show(closes.at(-1)!)})`;
+}

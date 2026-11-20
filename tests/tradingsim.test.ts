@@ -130,6 +130,7 @@ test("WTI e GBP/USD solo monitorati, nuovo mercato con fonte origina una domanda
   const report = (await f.state.baton()).baton!.report;
   expect(report).toContain("USOIL: solo monitoraggio");
   expect(report).toContain("GBP/USD: solo monitoraggio");
+  expect(report).toContain("Chiusure USOIL, 15Min");
   expect(await f.broker.orders()).toEqual([]);
 });
 

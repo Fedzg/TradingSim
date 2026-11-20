@@ -1,7 +1,7 @@
 import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAnalysis } from "./agents";
 import { type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
 import { enqueue } from "./chat";
-import type { Market, News, Series } from "./market";
+import { miniChart, type Market, type News, type Series } from "./market";
 import { limitFor, risk, stops, terminal, ticketFor, trading } from "./risk";
 import { type Baton, type RunLock, State } from "./state";
 import { missed, nextWake, type Wake } from "./time";
@@ -161,7 +161,13 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
       note(`${series.symbol} (${series.source}): ${series.error ?? "dati intraday non recenti"}; ultimo dato ${series.updated ?? "assente"}.`);
     }
   }
-  for (const series of charts.filter(x => !universe.some(symbol => symbol === x.symbol))) note(`${series.symbol}: solo monitoraggio. Serie ${series.source}.`);
+  for (const series of charts.filter(x => !universe.some(symbol => symbol === x.symbol))) {
+    note(`${series.symbol}: solo monitoraggio. Serie ${series.source}.`);
+    for (const interval of ["15Min", "1Day"]) {
+      const graph = miniChart(series, interval);
+      if (graph) note(`Chiusure ${series.symbol}, ${graph}`);
+    }
+  }
   for (const idea of chartAnalysis?.ideas ?? []) {
     if (watched.includes(idea.symbol)) note(`${idea.symbol} (${idea.horizon}): ${idea.direction}. ${idea.evidence}. Invalidazione: ${idea.invalidation}. Incertezza: ${idea.uncertainty}.`);
   }
@@ -219,7 +225,12 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     }
   } else note("Conto e P&L del giorno non verificati.");
   if (!decision?.orders.length) note("Nessun ordine discrezionale proposto.");
-  note(decision?.reasoning ?? "Decisione discrezionale non disponibile.");
+  if (decision) {
+    const sentences = decision.reasoning.split(/(?<=[.!?])\s+/);
+    const split = Math.ceil(sentences.length / 2);
+    note(`Motivazione: ${sentences.slice(0, split).join(" ")}`);
+    if (sentences.length > split) note(sentences.slice(split).join(" "));
+  } else note("Decisione discrezionale non disponibile.");
   const toCheck = redact([decision?.planNext ?? previous?.planNext ?? "Verificare conto, posizioni e fonti.",
     ...alerts, ...[...pending].map(id => `Ricontrollare ${id} su Alpaca.`)].join("\n"));
   note(`Piano: ${toCheck.split("\n")[0]}\nProssima sveglia: ${nextWake(new Date(Math.max(+now, Date.now())))} (ora di Roma).`);
