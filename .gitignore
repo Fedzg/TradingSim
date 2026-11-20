@@ -1,0 +1,5 @@
+secrets.ts
+.env*
+state/
+state-fake/
+node_modules/

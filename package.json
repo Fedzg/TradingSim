@@ -1,0 +1,10 @@
+{
+  "name": "tradingsim",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "once": "bun src/cli.ts once",
+    "schedule": "bun src/cli.ts schedule",
+    "status": "bun src/cli.ts status"
+  }
+}

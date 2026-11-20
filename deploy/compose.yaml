@@ -1,0 +1,33 @@
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    command: ["schedule"]
+    environment:
+      APCA_API_KEY_ID_FILE: /run/secrets/alpaca-key
+      APCA_API_SECRET_KEY_FILE: /run/secrets/alpaca-secret
+      TRADINGSIM_NEWS_SECONDS: "${TRADINGSIM_NEWS_SECONDS:-300}"
+    volumes:
+      - state:/var/lib/tradingsim
+      - codex:/home/tradingsim-agent/.codex
+    secrets:
+      - alpaca-key
+      - alpaca-secret
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  alpaca-key:
+    file: "${TRADINGSIM_SECRETS_DIR:-/run/tradingsim-secrets}/alpaca-key"
+  alpaca-secret:
+    file: "${TRADINGSIM_SECRETS_DIR:-/run/tradingsim-secrets}/alpaca-secret"
+
+volumes:
+  state:
+  codex:

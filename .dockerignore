@@ -1,0 +1,5 @@
+.git
+secrets.ts
+.env*
+state*
+node_modules

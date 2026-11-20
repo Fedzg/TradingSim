@@ -1,0 +1,60 @@
+# Worker cloud
+
+Serve una VM Linux sempre accesa con Docker Engine e Compose v2, un disco persistente
+per il data root di Docker e accesso HTTPS a ChatGPT, Alpaca Paper, Alpaca Data e Yahoo
+Finance. Mantieni un solo worker e lo stesso nome progetto Compose `tradingsim`.
+I volumi `state` e `codex` contengono rispettivamente dati dell'app e login ChatGPT.
+Non rimuoverli durante gli aggiornamenti. Non esporre porte pubbliche.
+
+Dal gestore dei segreti del provider, rendi disponibili sulla VM le due credenziali
+Paper come file `alpaca-key` e `alpaca-secret` in `/run/tradingsim-secrets` (o nella
+directory indicata da `TRADINGSIM_SECRETS_DIR`). Configura il recupero al boot con
+l'identità della VM. I file devono essere leggibili solo da root con permessi
+`0400` e si montano in sola lettura nel worker. Il processo Codex ha un UID separato.
+
+Dalla radice del checkout, costruisci l'immagine e inizializza una sola volta
+l'autenticazione del CLI con il tuo account ChatGPT tramite codice dispositivo.
+
+```sh
+docker compose -p tradingsim -f deploy/compose.yaml build
+docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps \
+  --user 10001:10001 --entrypoint codex worker login --device-auth
+```
+
+Completa il login sulla pagina indicata dal CLI. Verifica la possibilità di una
+risposta headless e poi verifica l'accesso Alpaca Paper senza inviare ordini.
+
+```sh
+docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps \
+  --user 10001:10001 --entrypoint codex worker --ask-for-approval never exec \
+  --ephemeral --skip-git-repo-check --ignore-user-config --sandbox read-only \
+  -c features.shell_tool=false 'Rispondi solamente OK.' </dev/null
+docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker status
+```
+
+Esegui una sveglia finta prima di attivare il worker. Lo stato finto usa
+`state-fake` sullo stesso volume, separato da `state`. Un secondo container
+deve ritrovare il testimone e la consegna finta.
+
+```sh
+docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker once --fake --slot 15:40
+docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker status --fake
+docker compose -p tradingsim -f deploy/compose.yaml up -d --no-build
+docker compose -p tradingsim -f deploy/compose.yaml logs -f worker
+```
+
+Aggiornamento da un commit verificato, dalla radice del checkout aggiornato, e arresto.
+
+```sh
+docker compose -p tradingsim -f deploy/compose.yaml build
+docker compose -p tradingsim -f deploy/compose.yaml stop worker
+docker compose -p tradingsim -f deploy/compose.yaml up -d --no-build
+# Arresto manuale
+docker compose -p tradingsim -f deploy/compose.yaml stop worker
+```
+
+Usa `docker compose ... exec worker bun src/cli.ts status` durante l'esecuzione.
+Configura Docker per l'avvio al boot. Verifica che il recupero dei segreti preceda
+il riavvio automatico dei container, oppure avvia Compose dal servizio di boot
+del provider dopo il recupero dei segreti. Il disco va protetto con permessi
+privati e conservato anche se la VM viene sostituita.
