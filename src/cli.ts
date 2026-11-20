@@ -3,6 +3,7 @@ import { config } from "./config";
 import { Alpaca, FakeBroker } from "./broker";
 import { CodexAgents, FakeAgents } from "./agents";
 import { enqueue, FakeChannel, flush, UnavailableChat, type Message } from "./chat";
+import { AlpacaStdio } from "./mcp";
 import { Market } from "./market";
 import { run } from "./run";
 import { State } from "./state";
@@ -20,9 +21,10 @@ const dateIndex = flags.indexOf("--date");
 const scheduledDate = dateIndex < 0 ? undefined : flags[dateIndex + 1];
 const opts = await config(fake);
 const state = new State(opts.root);
-const market = new Market(opts.key, opts.secret, fake);
+const mcp = fake ? undefined : new AlpacaStdio(opts.key, opts.secret);
+const market = new Market(mcp, fake);
 const channel = fake ? new FakeChannel(state, process.env.TRADINGSIM_FAKE_CHAT_FAIL === "1") : new UnavailableChat();
-const paper = () => fake ? new FakeBroker(state) : new Alpaca(opts.key, opts.secret);
+const paper = () => fake ? new FakeBroker(state) : new Alpaca(mcp!);
 const mode = fake ? ["--fake"] : [];
 await mkdir(state.root, { recursive: true, mode: 0o700 });
 
@@ -71,7 +73,10 @@ async function once() {
 }
 
 async function schedule() {
-  checkBroker();
+  if (!fake) {
+    await paper().account();
+    mcp?.close();
+  }
   const interval = Number(process.env.TRADINGSIM_NEWS_SECONDS ?? "300") * 1000;
   if (!(interval >= 30_000 && Number.isFinite(interval))) throw new Error("Intervallo delle notizie non valido: minimo 30 secondi.");
   let lastChecked = 0;
@@ -127,8 +132,6 @@ async function schedule() {
   await Promise.all([active?.exited, ...[...jobs].map(job => job.exited)]);
 }
 
-function checkBroker() { paper(); }
-
 async function supervise() {
   const proc = child("schedule.guard", "_schedule", mode);
   const terminate = () => proc.kill("SIGTERM");
@@ -141,6 +144,10 @@ try {
   switch (command) {
     case "once": await once(); break;
     case "status": await status(); break;
+    case "account-check":
+      await paper().account();
+      console.log(fake ? "Lettura MCP finta riuscita." : "Lettura MCP del conto Alpaca Paper riuscita.");
+      break;
     case "deliver": process.exitCode = exitStatus(await child("outbox.guard", "_flush", mode).exited); break;
     case "schedule": await supervise(); break;
     case "_schedule": await schedule(); break;
@@ -163,9 +170,11 @@ try {
         wake(scheduledDate, rawSlot as Slot), force);
       break;
     }
-    default: throw new Error("Comandi disponibili: once, schedule, status, deliver.");
+    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check.");
   }
 } catch (error) {
   console.error(opts.redact(String(error)));
   process.exitCode = 1;
+} finally {
+  mcp?.close();
 }

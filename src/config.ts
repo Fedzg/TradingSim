@@ -3,6 +3,10 @@ export const PAPER = "https://paper-api.alpaca.markets";
 const names = ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"] as const;
 export async function config(fake: boolean) {
   const endpoint = process.env.APCA_API_BASE_URL;
+  const paperFlag = process.env.ALPACA_PAPER_TRADE;
+  if (paperFlag !== undefined && !["true", "1", "yes"].includes(paperFlag.toLowerCase())) {
+    throw new Error("Configurazione Alpaca MCP live non consentita.");
+  }
   if (endpoint && endpoint.replace(/\/$/, "") !== PAPER) throw new Error("Endpoint ordini non consentito. Uso esclusivo di Alpaca Paper.");
   const path = resolve(import.meta.dir, "../secrets.ts");
   const local = !fake && await Bun.file(path).exists() ? (await import(path)).default : {};

@@ -14,7 +14,10 @@ bun run schedule --fake
 ```
 
 Per usare Alpaca Paper localmente, copia `secrets.example.ts` in `secrets.ts`,
-compila i campi Paper e accedi inizialmente con `codex login`. Rimuovi `--fake`
+compila i campi Paper, installa `alpaca-mcp-server==2.4.1` sul PATH (ad esempio
+`uv tool install alpaca-mcp-server==2.4.1`) e accedi con `codex login`.
+`bun src/cli.ts account-check` legge solo il conto via MCP e usa la stessa
+configurazione del worker. Il programma richiede MCP per Alpaca. Rimuovi `--fake`
 per operare sul conto simulato del broker. `bun run once` sceglie l'ultimo slot
 di oggi e `--force` consente di ripeterlo con i medesimi ID. Per il worker
 sempre acceso segui le [istruzioni di deploy](deploy/README.md).

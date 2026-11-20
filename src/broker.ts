@@ -1,4 +1,4 @@
-import { PAPER } from "./config";
+import { McpError, payload, type Mcp, type McpResult } from "./mcp";
 import type { State } from "./state";
 
 export type Side = "buy" | "sell";
@@ -19,67 +19,71 @@ export interface Broker {
   submit(intent: Intent): Promise<BrokerOrder>;
 }
 
-export class HttpError extends Error {
-  constructor(readonly status: number, service: string) { super(`${service}: HTTP ${status}`); }
-}
-
-export function alpacaHeaders(key: string, secret: string) {
-  return { "APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret };
+function decimal(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Number(value));
 }
 
 function brokerFields({ client_order_id, symbol, side, qty, filled_qty, status, limit_price }: BrokerOrder): BrokerOrder {
+  if (typeof client_order_id !== "string" || !client_order_id || typeof symbol !== "string" || !symbol ||
+      (side !== "buy" && side !== "sell") || !decimal(qty) || !decimal(filled_qty) ||
+      typeof status !== "string" || !status || (limit_price !== null && !decimal(limit_price))) {
+    throw new Error("Alpaca MCP: risposta ordine non valida o quantità non verificabile.");
+  }
   return { client_order_id, symbol, side, qty, filled_qty, status, limit_price };
 }
 
 export class Alpaca implements Broker {
-  constructor(private key: string, private secret: string) {
-    if (!key || !secret) throw new Error("Credenziali Alpaca Paper mancanti.");
-  }
-  private async request<T>(path: string, body?: object): Promise<T> {
-    let response: Response;
-    try {
-      response = await fetch(PAPER + path, {
-        method: body ? "POST" : "GET", body: body ? JSON.stringify(body) : undefined,
-        redirect: "error", signal: AbortSignal.timeout(12_000),
-        headers: { ...alpacaHeaders(this.key, this.secret), "Content-Type": "application/json" },
-      });
-    } catch { throw new Error("Alpaca Paper: connessione interrotta o scaduta."); }
-    if (!response.ok) throw new HttpError(response.status, "Alpaca Paper");
-    return response.json() as Promise<T>;
+  constructor(private readonly mcp: Mcp) {}
+
+  async account(): Promise<Account> {
+    const { equity, last_equity, cash, buying_power, trading_blocked } = await payload<Account>(this.mcp, "get_account_info");
+    const balances = [equity, last_equity, cash, buying_power];
+    if (!balances.every(decimal) ||
+        typeof trading_blocked !== "boolean") throw new Error("Alpaca MCP: risposta conto non valida.");
+    return { equity, last_equity, cash, buying_power, trading_blocked };
   }
 
   async snapshot() {
-    const after = encodeURIComponent(new Date(Date.now() - 172800_000).toISOString());
+    const after = new Date(Date.now() - 172800_000).toISOString();
     const [account, positions, orders, clock] = await Promise.all([
-      this.request<Account>("/v2/account"), this.request<Position[]>("/v2/positions"),
-      this.request<BrokerOrder[]>(`/v2/orders?status=all&limit=500&after=${after}`),
-      this.request<Snapshot["clock"]>("/v2/clock"),
+      this.account(), payload<Position[]>(this.mcp, "get_all_positions"),
+      payload<BrokerOrder[]>(this.mcp, "get_orders", { status: "all", limit: 500, after }),
+      payload<Snapshot["clock"]>(this.mcp, "get_clock"),
     ]);
-    const open = await this.request<BrokerOrder[]>("/v2/orders?status=open&limit=500");
-    if (orders.length >= 500) throw new Error("Alpaca Paper: elenco ordini recenti potenzialmente incompleto.");
-    if (open.length >= 500) throw new Error("Alpaca Paper: elenco ordini aperti potenzialmente incompleto.");
-    const { equity, last_equity, cash, buying_power, trading_blocked } = account;
+    const open = await payload<BrokerOrder[]>(this.mcp, "get_orders", { status: "open", limit: 500 });
+    if (!Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(open) ||
+        typeof clock.is_open !== "boolean" || !Number.isFinite(Date.parse(clock.timestamp))) {
+      throw new Error("Alpaca MCP: snapshot non valido.");
+    }
+    if (orders.length >= 500 || open.length >= 500) throw new Error("Alpaca MCP: elenco ordini potenzialmente incompleto.");
     return {
-      account: { equity, last_equity, cash, buying_power, trading_blocked },
-      positions: positions.map(({ symbol, qty, qty_available, avg_entry_price, current_price, market_value }) =>
-        ({ symbol, qty, qty_available, avg_entry_price, current_price, market_value })),
+      account,
+      positions: positions.map(({ symbol, qty, qty_available, avg_entry_price, current_price, market_value }) => {
+        if (typeof symbol !== "string" || !symbol || ![qty, qty_available, avg_entry_price, current_price, market_value].every(decimal)) {
+          throw new Error("Alpaca MCP: dati delle posizioni non verificabili.");
+        }
+        return { symbol, qty, qty_available, avg_entry_price, current_price, market_value };
+      }),
       orders: [...new Map([...orders, ...open].map(x => [x.client_order_id, brokerFields(x)])).values()],
       clock: { is_open: clock.is_open, timestamp: clock.timestamp },
     };
   }
 
   async tradable(symbol: string) {
-    const asset = await this.request<{ tradable: boolean; status: string; class: string }>(`/v2/assets/${encodeURIComponent(symbol)}`);
+    const asset = await payload<{ tradable: boolean; status: string; class: string }>(this.mcp, "get_asset", { symbol_or_asset_id: symbol });
     return asset.tradable === true && asset.status === "active" && asset.class === "us_equity";
   }
 
   async find(id: string) {
-    try { return brokerFields(await this.request<BrokerOrder>(`/v2/orders:by_client_order_id?client_order_id=${encodeURIComponent(id)}`)); }
-    catch (error) { if (error instanceof HttpError && error.status === 404) return undefined; throw error; }
+    try {
+      const result = await payload<BrokerOrder>(this.mcp, "get_order_by_client_id", { client_order_id: id });
+      if (result.client_order_id !== id) throw new Error("Alpaca MCP: ID ordine diverso da quello richiesto.");
+      return brokerFields(result);
+    } catch (error) { if (error instanceof McpError && error.notFound) return undefined; throw error; }
   }
 
   submit({ id, order, limit }: Intent) {
-    return this.request<BrokerOrder>("/v2/orders", {
+    return payload<BrokerOrder>(this.mcp, "place_stock_order", {
       symbol: order.symbol, side: order.side, qty: String(order.qty), time_in_force: "day",
       client_order_id: id, ...(limit === null ? { type: "market" } : { type: "limit", limit_price: String(limit) }),
     }).then(brokerFields);
@@ -89,10 +93,15 @@ export class Alpaca implements Broker {
 export const universe = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "GLD", "TLT"] as const;
 export const watched = [...universe, "USOIL", "GBP/USD"];
 
-export class FakeBroker implements Broker {
+export class FakeBroker extends Alpaca {
+  constructor(private state: State, mcp: Mcp = new FakeMcp(state)) { super(mcp); }
+  async orders() { return await this.state.read<BrokerOrder[]>("fake-broker.json") ?? []; }
+}
+
+export class FakeMcp implements Mcp {
   constructor(private state: State) {}
   async orders() { return await this.state.read<BrokerOrder[]>("fake-broker.json") ?? []; }
-  async snapshot(): Promise<Snapshot> {
+  private async snapshot(): Promise<Snapshot> {
     return {
       account: { equity: "10000", last_equity: "9950", cash: "8000", buying_power: "8000", trading_blocked: false },
       positions: await this.state.read<Position[]>("fake-positions.json") ?? [],
@@ -100,9 +109,28 @@ export class FakeBroker implements Broker {
       clock: { is_open: await this.state.read<boolean>("fake-open.json") ?? true, timestamp: new Date().toISOString() },
     };
   }
-  async tradable(symbol: string) { return universe.some(x => x === symbol); }
-  async find(id: string) { return (await this.orders()).find(x => x.client_order_id === id); }
-  async submit({ id, order, limit }: Intent) {
+  async call(name: string, args: Record<string, any> = {}): Promise<McpResult> {
+    const snapshot = await this.snapshot();
+    const reply = (data: unknown) => ({ structuredContent: { _alpaca_mcp_security: {}, data: Array.isArray(data) ? { result: data } : data } });
+    switch (name) {
+      case "get_account_info": return reply(snapshot.account);
+      case "get_all_positions": return reply(snapshot.positions);
+      case "get_clock": return reply(snapshot.clock);
+      case "get_orders": return reply(snapshot.orders);
+      case "get_asset": return reply({ tradable: universe.some(x => x === args.symbol_or_asset_id), status: "active", class: "us_equity" });
+      case "get_order_by_client_id": {
+        const item = await this.find(args.client_order_id);
+        return item ? reply(item) : { isError: true, content: [{ type: "text", text: "Error calling tool 'get_order_by_client_id': HTTP error 404: Not Found" }] };
+      }
+      case "place_stock_order": return reply(await this.submit({
+        id: args.client_order_id, order: { symbol: args.symbol, side: args.side, qty: Number(args.qty), reason: "MCP finto" },
+        limit: args.limit_price === undefined ? null : Number(args.limit_price), attemptedAt: new Date().toISOString(),
+      }));
+      default: return { isError: true, content: [{ type: "text", text: "Strumento MCP finto non supportato." }] };
+    }
+  }
+  private async find(id: string) { return (await this.orders()).find(x => x.client_order_id === id); }
+  private async submit({ id, order, limit }: Intent) {
     const orders = await this.orders();
     if (orders.some(x => x.client_order_id === id)) throw new Error("ID duplicato nel broker finto.");
     const item: BrokerOrder = {

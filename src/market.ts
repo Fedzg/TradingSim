@@ -1,4 +1,5 @@
-import { alpacaHeaders, HttpError, universe, watched } from "./broker";
+import { universe, watched } from "./broker";
+import { McpError, payload, type Mcp } from "./mcp";
 import type { State } from "./state";
 
 type Candle = { t: string; o: number; h: number; l: number; c: number; v: number | null };
@@ -6,9 +7,9 @@ export type Series = { symbol: string; source: string; updated: string | null; e
 export type Article = { title: string; link: string; source: string; published: string; symbols: string[]; summary: string };
 export type News = { lastSuccess: string | null; checked: string; error?: string; articles: Article[] };
 
-async function json<T>(url: string, headers?: Record<string, string>): Promise<T> {
-  const response = await fetch(url, { headers, redirect: "error", signal: AbortSignal.timeout(10_000) });
-  if (!response.ok) throw new HttpError(response.status, new URL(url).host);
+async function json<T>(url: string): Promise<T> {
+  const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new Error(`Fonte grafici: HTTP ${response.status}`);
   return response.json() as Promise<T>;
 }
 
@@ -36,15 +37,16 @@ export function fakeCharts(now: Date): Series[] {
 }
 
 export class Market {
-  constructor(private key: string, private secret: string, private fake: boolean) {}
+  constructor(private mcp: Mcp | undefined, private fake: boolean) {}
 
   async charts(now: Date): Promise<Series[]> {
     if (this.fake) return fakeCharts(now);
     const stocks = Promise.all(["15Min", "1Day"].map(async interval => {
       const since = new Date(+now - (interval === "15Min" ? 5 : 75) * 86400_000).toISOString();
-      const params = new URLSearchParams({ symbols: universe.join(","), timeframe: interval, feed: "iex", start: since, limit: "10000" });
       type Bar = Omit<Candle, "v"> & { v: number };
-      return json<{ bars: Record<string, Bar[]> }>(`https://data.alpaca.markets/v2/stocks/bars?${params}`, alpacaHeaders(this.key, this.secret));
+      return payload<{ bars: Record<string, Bar[]> }>(this.mcp!, "get_stock_bars", {
+        symbols: universe.join(","), timeframe: interval, feed: "iex", start: since, limit: 10000,
+      });
     }));
     const extras = Promise.all([["USOIL", "CL=F"], ["GBP/USD", "GBPUSD=X"]].map(async ([symbol, ticker]) => {
       const source = `Yahoo Finance ${ticker}` + (symbol === "USOIL" ? ", futures NYMEX WTI front-month continuo" : "");
@@ -78,7 +80,7 @@ export class Market {
         .filter(article => Date.parse(article.published) >= +now - 48 * 3600_000)
         .sort((a, b) => b.published.localeCompare(a.published)).slice(0, 200) };
     } catch (error) {
-      next = { ...previous, checked, error: error instanceof HttpError ? error.message : "Fonte Alpaca News indisponibile." };
+      next = { ...previous, checked, error: error instanceof McpError ? error.message : "Fonte Alpaca News indisponibile." };
     }
     await state.write("news.json", next);
     return next;
@@ -89,9 +91,11 @@ export class Market {
   }
 
   private async alpacaNews(now: Date): Promise<Article[]> {
-    const params = new URLSearchParams({ start: new Date(+now - 48 * 3600_000).toISOString(), limit: "50", sort: "desc" });
+
     type Entry = { headline: string; url: string; source: string; created_at: string; symbols: string[]; summary: string };
-    const { news } = await json<{ news: Entry[] }>(`https://data.alpaca.markets/v1beta1/news?${params}`, alpacaHeaders(this.key, this.secret));
+    const { news } = await payload<{ news: Entry[] }>(this.mcp!, "get_news", {
+      start: new Date(+now - 48 * 3600_000).toISOString(), limit: 50, sort: "desc",
+    });
     return news.filter(x => /^https:\/\//.test(x.url)).map(x => ({
       title: x.headline.slice(0, 300), link: x.url, source: x.source, published: x.created_at,
       symbols: x.symbols, summary: (x.summary || "").slice(0, 600),

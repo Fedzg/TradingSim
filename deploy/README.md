@@ -10,7 +10,11 @@ Dal gestore dei segreti del provider, rendi disponibili sulla VM le due credenzi
 Paper come file `alpaca-key` e `alpaca-secret` in `/run/tradingsim-secrets` (o nella
 directory indicata da `TRADINGSIM_SECRETS_DIR`). Configura il recupero al boot con
 l'identità della VM. I file devono essere leggibili solo da root con permessi
-`0400` e si montano in sola lettura nel worker. Il processo Codex ha un UID separato.
+`0400` e si montano in sola lettura nel worker. Il processo Codex ha un UID separato. Il worker lancia il server MCP ufficiale
+`alpaca-mcp-server==2.4.1` via stdio e forza `ALPACA_PAPER_TRADE=true`.
+Il container ha bisogno delle proprie credenziali Paper. Il collegamento di
+un plugin alla chat non rende le sue credenziali o i suoi strumenti disponibili
+al container.
 
 Dalla radice del checkout, costruisci l'immagine e inizializza una sola volta
 l'autenticazione del CLI con il tuo account ChatGPT tramite codice dispositivo.
@@ -34,8 +38,12 @@ docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps \
   --user 10001:10001 --entrypoint codex worker --ask-for-approval never exec \
   --ephemeral --skip-git-repo-check --ignore-user-config --sandbox read-only \
   -c features.shell_tool=false 'Rispondi solamente OK.' </dev/null
-docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker status
+docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker account-check
 ```
+
+`account-check` usa lo stesso server MCP, le credenziali e i mount del worker.
+Invoca solo `get_account_info` e non stampa il conto. Lo scheduler esegue
+questa stessa lettura all’avvio prima di accettare sveglie.
 
 Esegui una sveglia finta prima di attivare il worker. Lo stato finto usa
 `state-fake` sullo stesso volume, separato da `state`. Un secondo container

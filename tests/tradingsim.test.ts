@@ -3,8 +3,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FakeAgents, reviewOrder, type Agents, type Decision, type Role } from "../src/agents";
-import { FakeBroker, type Position, type Proposal } from "../src/broker";
+import { FakeBroker, FakeMcp, type Position, type Proposal } from "../src/broker";
 import { FakeChannel, flush, type Message } from "../src/chat";
+import type { Mcp } from "../src/mcp";
 import { Market } from "../src/market";
 import { ticketFor } from "../src/risk";
 import { run } from "../src/run";
@@ -23,12 +24,12 @@ function decision(orders: Proposal[]): Decision {
   return { orders, reasoning: "Il test verifica la proposta. I dati sono simulati. Il rischio è valutato dal codice.", planNext: "Controllare gli ordini." };
 }
 
-async function fixture(agents: Agents = new FakeAgents()) {
+async function fixture(agents: Agents = new FakeAgents(), wrapMcp?: (mcp: Mcp) => Mcp) {
   const root = await mkdtemp(join(tmpdir(), "tradingsim-test-"));
   roots.push(root);
   const state = new State(root);
-  const broker = new FakeBroker(state);
-  const input = { state, broker, agents, market: new Market("", "", true), redact: (x: string) => x };
+  const broker = new FakeBroker(state, wrapMcp?.(new FakeMcp(state)));
+  const input = { state, broker, agents, market: new Market(undefined, true), redact: (x: string) => x };
   const messages = async () => await Promise.all((await state.list("outbox")).map(file => state.read<Message>(`outbox/${file}`)));
   return { ...input, messages, start: (entry = opening, force = false) => run(input, entry, force, now) };
 }
@@ -153,4 +154,43 @@ test("mercato chiuso blocca anche gli stop; fuso Roma con e senza ora legale", a
   expect(await f.broker.orders()).toEqual([]);
   expect(rome(new Date("2026-09-24T13:40:00Z")).time).toBe("15:40");
   expect(rome(new Date("2026-11-20T14:40:00Z")).time).toBe("15:40");
+});
+
+const mcpFaults = [
+  ["conto: errore MCP", "get_account_info", { isError: true }],
+  ["conto: risposta incompleta", "get_account_info", { structuredContent: { equity: "10000" } }],
+  ["posizioni: envelope malformato", "get_all_positions", { structuredContent: { _alpaca_mcp_security: {}, data: {} } }],
+  ["orologio: sessione non verificabile", "get_clock", { structuredContent: { is_open: "true", timestamp: now.toISOString() } }],
+  ["ricerca: errore diverso da 404", "get_order_by_client_id", { isError: true, content: [{ type: "text", text: "HTTP error 403: Forbidden" }] }],
+] as const;
+
+for (const [scenario, target, fault] of mcpFaults) {
+  test(`guasto MCP ${scenario}: nessun invio`, async () => {
+    const calls: string[] = [];
+    const f = await fixture(new FakeAgents(), mcp => ({ async call(name, args) {
+      calls.push(name);
+      if (name === target) return structuredClone(fault) as unknown as Awaited<ReturnType<Mcp["call"]>>;
+      return mcp.call(name, args);
+    } }));
+    await f.start();
+    expect(calls).toContain(target);
+    expect(calls).not.toContain("place_stock_order");
+    expect(await f.broker.orders()).toEqual([]);
+    expect((await f.state.baton()).baton?.planNext).toContain("Alpaca MCP");
+  });
+}
+
+test("guasto MCP dopo invio: riconcilia lo stesso ID senza reinviare", async () => {
+  let sends = 0;
+  const f = await fixture(new FakeAgents(), mcp => ({ async call(name, args) {
+    if (name !== "place_stock_order") return mcp.call(name, args);
+    sends++;
+    await mcp.call(name, args);
+    return { structuredContent: { _alpaca_mcp_security: {}, data: { error: { timeout: true } } } };
+  } }));
+  await f.start();
+  await f.start(opening, true);
+  expect(sends).toBe(1);
+  expect((await f.broker.orders())[0].client_order_id).toBe("2026-09-24-1540-SPY-buy");
+  expect((await f.state.intents())[0].observed?.status).toBe("accepted");
 });

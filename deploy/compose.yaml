@@ -8,6 +8,7 @@ services:
     stop_grace_period: 45s
     command: ["schedule"]
     environment:
+      ALPACA_PAPER_TRADE: "true"
       APCA_API_KEY_ID_FILE: /run/secrets/alpaca-key
       APCA_API_SECRET_KEY_FILE: /run/secrets/alpaca-secret
       TRADINGSIM_NEWS_SECONDS: "${TRADINGSIM_NEWS_SECONDS:-300}"
