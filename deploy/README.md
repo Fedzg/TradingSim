@@ -1,5 +1,6 @@
 # Worker cloud
 
+[English](README.en.md) · Italiano · [Windows](windows.it.md)
 Serve una VM Linux sempre accesa con Docker Engine e Compose v2.24 o successivo, un disco persistente
 per il data root di Docker e accesso HTTPS a ChatGPT, Alpaca Paper, Alpaca Data e Yahoo
 Finance. Mantieni un solo worker e lo stesso nome progetto Compose `tradingsim`.
@@ -112,4 +113,38 @@ subito la stessa analisi di mercato, usa il comando di sola lettura:
 
 ```sh
 docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts chart-report
+```
+
+### Scoperta automatica della watchlist
+
+Il worker avvia una scansione al massimo ogni 15 minuti. Se gli analisti
+delle notizie e dei grafici confermano entrambi il candidato, lo aggiunge
+direttamente alla watchlist e accoda una conferma Telegram. La scansione
+funziona anche senza Telegram configurato. L’aggiunta abilita il solo
+monitoraggio e non cambia l’universo negoziabile.
+
+La scansione valuta un paniere esplicito di azioni, forex, futures, crypto e
+CFD. Un candidato deve muoversi almeno 1,5 volte la mediana dei movimenti
+giornalieri recenti e avere una variazione coerente su 60 minuti pari almeno
+al 20% della mediana. Usa candele intraday chiuse e rifiuta dati oltre 90
+minuti o con un'ora discontinua. Il volume relativo è indicato quando
+disponibile. La proposta riporta ticker, mercato, fonte e ultimo dato.
+Il riepilogo segnala le fonti indisponibili o con dati insufficienti.
+
+Il worker legge Yahoo Finance (`query1.finance.yahoo.com`) per i grafici del
+paniere e la cache Alpaca News per le notizie associate. L'oro `GC=F` è
+la serie continua front-month Yahoo. Il CFD OANDA `SPX500_USD` è identificato
+per provider, ma le rilevazioni riguardano solo il sottostante `^GSPC`.
+Quotazioni, spread e disponibilità del CFD non vengono verificati.
+
+Il volume `state` conserva la watchlist e le conferme in `watchlist.json`.
+Al riavvio il worker ripristina gli avvisi dalla watchlist salvata. L’API
+Telegram può duplicare materialmente un messaggio se la risposta di
+consegna si perde. Gli strumenti già presenti rimangono unici.
+
+```sh
+# Legge solo le fonti del paniere senza inviare messaggi o modificare la watchlist
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts discovery-scan
+# Legge la copertura osservata e la watchlist dal volume
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts discovery-status
 ```

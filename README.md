@@ -1,39 +1,60 @@
 # TradingSim
 
-Worker Bun e TypeScript per simulare ordini su Alpaca Paper. Le sveglie sono
-alle 09:00, 15:40, 18:30 e 21:40 in ora di Roma. Il briefing delle 09:00 non
-invia ordini. L'orologio di Alpaca governa gli altri slot.
+English · [Italiano](README.it.md)
 
-Su Linux con Bun 1.3.14 e `flock` di util-linux:
+TradingSim is a Bun and TypeScript worker for **Alpaca Paper only**. It uses the
+official Alpaca MCP server, headless Codex CLI, Docker Compose, and optional
+Telegram notifications. It does not connect to a live trading account.
+
+- Trading sessions are checked at 09:00, 15:40, 18:30, and 21:40 in
+  `Europe/Rome`. The 09:00 briefing does not submit orders. The Alpaca market
+  clock governs the other sessions.
+- Discretionary orders require an independent review and risk checks. A
+  deterministic client order ID lets the worker reconcile uncertain submissions
+  without automatically submitting them again. A broker acceptance is distinct
+  from a fill.
+- Market discovery scans a fixed set of stocks, FX, futures, crypto, and CFD
+  underlyings. Two analysts must agree before an instrument is added to the
+  persistent watchlist. Additions are **monitoring only**. Telegram sends an
+  informational confirmation and does not ask for approval.
+
+## Quick start
+
+On Linux or WSL 2 with Bun 1.3.14 and util-linux `flock`:
 
 ```sh
 bun test
 bun run once --fake --slot 15:40
 bun run status --fake
-bun run schedule --fake
 ```
 
-Per usare Alpaca Paper localmente, copia `secrets.example.ts` in `secrets.ts`,
-compila i campi Paper, installa `alpaca-mcp-server==2.4.1` sul PATH (ad esempio
-`uv tool install alpaca-mcp-server==2.4.1`) e accedi con `codex login`.
-`bun src/cli.ts account-check` legge solo il conto via MCP e usa la stessa
-configurazione del worker. Il programma richiede MCP per Alpaca. Rimuovi `--fake`
-per operare sul conto simulato del broker. `bun run once` sceglie l'ultimo slot
-di oggi e `--force` consente di ripeterlo con i medesimi ID. Per il worker
-sempre acceso segui le [istruzioni di deploy](deploy/README.md).
+The fake run uses a separate state directory and does not call Alpaca, Codex or
+Telegram. For a real Paper worker, follow the instructions for
+[Windows with Docker Desktop and WSL 2](deploy/windows.md) or
+[Linux and cloud VMs](deploy/README.en.md). Keep all credentials, account data,
+and runtime state outside the repository.
 
-I grafici del portafoglio sono Alpaca IEX, le notizie provengono da Alpaca News.
-Il WTI usa la serie Yahoo Finance `CL=F`, futures NYMEX front-month continuo.
-GBP/USD usa `GBPUSD=X`. Queste due serie sono solo di monitoraggio. Un acquisto
-ha prezzo limite fissato prima della revisione e può rimanere ineseguito.
-Un invio incerto rimane registrato e viene riconciliato per ID senza reinvio
-automatico. Se il broker non rende l'esito verificabile, controlla il registro
-`intents/` e il conto Paper prima di intervenire.
+## Market data and alerts
 
-I resoconti, gli allarmi, le notizie selezionate, i nuovi mercati proposti e
-gli aggiornamenti degli ordini Paper sono persistiti in `outbox/`.
-Per riceverli su Telegram configura il [canale HTTP](deploy/README.md#telegram).
-`bun run status` mostra la coda e il motivo di mancata consegna.
-Per una prova offline, il canale finto scrive in `fake-chat/`. Se si simula
-un errore con `TRADINGSIM_FAKE_CHAT_FAIL=1`, lo si può ritentare con
-`bun src/cli.ts deliver --fake`, che esegue solo la consegna.
+The worker uses Alpaca IEX for portfolio charts and Alpaca News for news.
+Yahoo Finance supplies additional price series. WTI uses `CL=F`, the
+continuous NYMEX front-month futures series. The OANDA S&P 500 CFD is
+monitored via its underlying index only. The worker reports unavailable or
+insufficient discovery feeds. A functioning feed depends on the deployment
+network and provider access.
+
+Reports, order status updates, news, and watchlist additions are written to
+a persistent outbox. Telegram delivery is optional. Large messages are sent in
+parts. If Telegram accepts a part and the acknowledgment is lost, that part can
+be repeated. Review the local outbox and broker state before sharing logs,
+which may include Paper account data.
+
+## Checks without orders
+
+- `bun src/cli.ts account-check` reads the Paper account through MCP.
+- `bun src/cli.ts discovery-scan` reads the discovery feeds without notifying
+  Telegram or editing the watchlist.
+- `bun src/cli.ts discovery-status` reads the most recent source coverage and
+  the saved watchlist.
+
+See [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md).

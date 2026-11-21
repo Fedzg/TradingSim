@@ -2,6 +2,8 @@ import { mkdir } from "node:fs/promises";
 import { config } from "./config";
 import { Alpaca, FakeBroker } from "./broker";
 import { ask, CodexAgents, FakeAgents, type Charts } from "./agents";
+import { Discovery, savedWatchlist } from "./discovery";
+import { readSeries, scan } from "./discovery-sources";
 import { chartScenarios } from "./chart-scenarios";
 import { enqueue, FakeChannel, flush, UnavailableChat, type Message } from "./chat";
 import { AlpacaStdio } from "./mcp";
@@ -26,6 +28,14 @@ const opts = await config(fake);
 const state = new State(opts.root);
 const mcp = fake ? undefined : new AlpacaStdio(opts.key, opts.secret);
 const market = new Market(mcp, fake);
+const marketWithWatchlist = async () => {
+  if (fake) return market;
+  const watchlist = await savedWatchlist(state);
+  return new Market(mcp, false, () => Promise.all(watchlist.map(async item => {
+    try { return await readSeries(item); }
+    catch { return { symbol: item.symbol, source: item.venue, updated: null, intervals: {}, error: "Fonte watchlist indisponibile" }; }
+  })));
+};
 const telegram = opts.telegram && new TelegramChannel(opts.telegram.token, opts.telegram.chatId);
 const channel = fake ? new FakeChannel(state, process.env.TRADINGSIM_FAKE_CHAT_FAIL === "1") : telegram ?? new UnavailableChat();
 const paper = () => fake ? new FakeBroker(state) : new Alpaca(mcp!);
@@ -86,6 +96,7 @@ async function schedule() {
   let lastChecked = 0;
   let lastLaunch = "";
   let active: ReturnType<typeof child> | undefined;
+  let discovering = false;
   const jobs = new Set<ReturnType<typeof child>>();
   let stopping = false;
   function background(lock: string, command: string) {
@@ -93,7 +104,8 @@ async function schedule() {
     jobs.add(proc);
     void proc.exited.then(() => {
       jobs.delete(proc);
-      if (command === "_news" && !stopping) background("outbox.guard", "_flush");
+      if (command === "_discover") discovering = false;
+      if ((command === "_news" || command === "_discover") && !stopping) background("outbox.guard", "_flush");
     });
   }
   let wakeUp: (() => void) | undefined;
@@ -124,6 +136,10 @@ async function schedule() {
             if (!stopping) background("outbox.guard", "_flush");
           });
         }
+      }
+      if (!fake && !discovering) {
+        discovering = true;
+        background("discovery.guard", "_discover");
       }
       if (+now - lastChecked >= interval) {
         lastChecked = +now;
@@ -160,10 +176,10 @@ try {
       console.log("Messaggio di prova Telegram inviato.");
       break;
     case "chart-report": {
-      if (!telegram) throw new Error("Configura Telegram per il resoconto dei grafici.");
+      if (!fake && !telegram) throw new Error("Configura Telegram per il resoconto dei grafici.");
       const now = new Date();
-      const charts = await market.charts(now);
-      const analysis = await ask<Charts>(new CodexAgents(opts.redact), "charts", { now, charts });
+      const charts = await (await marketWithWatchlist()).charts(now);
+      const analysis = await ask<Charts>(fake ? new FakeAgents() : new CodexAgents(opts.redact), "charts", { now, charts });
       const scenarios = chartScenarios(analysis, charts, now)
         ?? "Nessuno scenario direzionale con dati sufficienti nell’ultimo controllo.";
       const { date, time } = rome(now);
@@ -194,14 +210,37 @@ try {
       }
       break;
     }
+    case "discovery-status": {
+      const engine = new Discovery(state, new CodexAgents(opts.redact), opts.redact);
+      const { scanAt, coverage } = await engine.status();
+      console.log(JSON.stringify({ scanAt, coverage, watchlist: await savedWatchlist(state) }, null, 2));
+      break;
+    }
+    case "discovery-scan": {
+      if (fake) throw new Error("La scansione offline si verifica con bun test.");
+      console.log(JSON.stringify(await scan(new Date()), null, 2));
+      break;
+    }
+    case "_discover": {
+      if (fake) break;
+      const engine = new Discovery(state, new CodexAgents(opts.redact), opts.redact);
+      const { scanAt } = await engine.status();
+      const now = new Date();
+      if (!scanAt || +now - Date.parse(scanAt) >= 15 * 60_000) {
+        await engine.collect(await scan(now), (await market.cachedNews(state)).articles, now);
+      } else {
+        await engine.publish();
+      }
+      break;
+    }
     case "_flush": await flush(state, channel); break;
     case "_run": {
       if (!scheduledDate || !slots.includes(rawSlot as Slot)) throw new Error("Sveglia interna non valida.");
-      await run({ state, broker: paper(), agents: fake ? new FakeAgents() : new CodexAgents(opts.redact), market, redact: opts.redact },
+      await run({ state, broker: paper(), agents: fake ? new FakeAgents() : new CodexAgents(opts.redact), market: await marketWithWatchlist(), redact: opts.redact },
         wake(scheduledDate, rawSlot as Slot), force);
       break;
     }
-    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check, telegram-check, chart-report.");
+    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check, telegram-check, chart-report, discovery-status, discovery-scan.");
   }
 } catch (error) {
   console.error(opts.redact(String(error)));

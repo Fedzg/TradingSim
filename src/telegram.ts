@@ -8,6 +8,7 @@ const titles = {
   "scenario-grafici": "Scenari di rialzo e ribasso",
   ordine: "Aggiornamento ordine Paper",
   allarmi: "Allarmi",
+  watchlist: "Watchlist",
 };
 
 function splitTelegramText(text: string) {

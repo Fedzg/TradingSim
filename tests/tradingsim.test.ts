@@ -121,7 +121,7 @@ test("approvazione vincolata a quantità e prezzo limite", async () => {
   expect(first.ticket).not.toBe(ticketFor(order, 101));
 });
 
-test("WTI e GBP/USD solo monitorati, nuovo mercato con fonte origina una domanda", async () => {
+test("WTI e GBP/USD solo monitorati, il ruolo notizie non può aggirare la scoperta", async () => {
   const base = new FakeAgents(decision([{ ...order, symbol: "USOIL" }, { ...order, symbol: "GBP/USD" }]));
   const f = await fixture({ async invoke(role: Role) {
     if (role !== "news") return base.invoke(role);
@@ -130,7 +130,7 @@ test("WTI e GBP/USD solo monitorati, nuovo mercato con fonte origina una domanda
   } });
   await f.start();
   const messages = await f.messages();
-  expect(messages.some(x => x?.text.includes("Vuoi aggiungere Euro/Dollaro"))).toBe(true);
+  expect(messages.some(x => x?.kind === "mercato" || x?.kind === "watchlist")).toBe(false);
   const report = (await f.state.baton()).baton!.report;
   expect(report).toContain("USOIL: solo monitoraggio");
   expect(report).toContain("GBP/USD: solo monitoraggio");

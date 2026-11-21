@@ -4,3 +4,6 @@ telegram.env
 state/
 state-fake/
 node_modules/
+alpaca-key
+alpaca-secret
+watchlist.json

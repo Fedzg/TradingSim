@@ -157,9 +157,10 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     }
   } catch (error) { alerts.push(`Notizie indisponibili: ${errorText(error)}`); }
 
+  const monitored = [...new Set([...watched, ...charts.map(series => series.symbol)])];
   const analysts = await Promise.allSettled([
     ask<Charts>(agents, "charts", { now, charts }),
-    ask<NewsAnalysis>(agents, "news", { now, news: news && { ...news, articles: news.articles.slice(0, 30) }, watched }),
+    ask<NewsAnalysis>(agents, "news", { now, news: news && { ...news, articles: news.articles.slice(0, 30) }, watched: monitored }),
   ]);
   if (analysts[0].status === "fulfilled") chartAnalysis = analysts[0].value;
   else alerts.push(`Analisi grafici mancante: ${errorText(analysts[0].reason)}`);
@@ -179,7 +180,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     }
   }
   for (const idea of chartAnalysis?.ideas ?? []) {
-    if (watched.includes(idea.symbol)) note(`${idea.symbol} (${idea.horizon}): ${idea.direction}. ${idea.evidence}. Invalidazione: ${idea.invalidation}. Incertezza: ${idea.uncertainty}.`);
+    if (charts.some(series => series.symbol === idea.symbol)) note(`${idea.symbol} (${idea.horizon}): ${idea.direction}. ${idea.evidence}. Invalidazione: ${idea.invalidation}. Incertezza: ${idea.uncertainty}.`);
   }
   for (const item of chartAnalysis?.limitations ?? []) note(item);
   for (const item of newsAnalysis?.limitations ?? []) note(item);
@@ -190,16 +191,11 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
       await enqueue(state, entry.id, "notizia", redact(summary), JSON.stringify([event.link, event.published]));
     }
   }
-  for (const idea of newsAnalysis?.newMarkets ?? []) {
-    const source = news?.articles.find(article => article.link === idea.link && article.published === idea.published && article.source === idea.source);
-    if (!source || watched.some(symbol => symbol.toUpperCase() === idea.symbol.toUpperCase())) continue;
-    await enqueue(state, entry.id, "mercato", redact(`Vuoi aggiungere ${idea.name} (${idea.symbol}) al monitoraggio? ${idea.event}. ${idea.reason}. Fonte: ${source.source}, ${source.published}, ${source.link}`),
-      JSON.stringify([idea.symbol.toUpperCase(), source.link, source.published]));
-  }
-
-  const analysisCharts = chartAnalysis && { ...chartAnalysis, ideas: chartAnalysis.ideas.map(({ bias: _bias, ...idea }) => idea) };
+  const analysisCharts = chartAnalysis && { ...chartAnalysis, ideas: chartAnalysis.ideas.filter(idea => watched.includes(idea.symbol)).map(({ bias: _bias, ...idea }) => idea) };
+  const analysisNews = newsAnalysis && { ...newsAnalysis, newMarkets: [],
+    events: newsAnalysis.events.filter(event => event.symbols.some(symbol => watched.includes(symbol))) };
   const context = { entry, account: snapshot?.account, positions: snapshot?.positions, recentOrders: snapshot?.orders.slice(0, 30),
-    clock: snapshot?.clock, plan: previous?.planNext, pending: [...pending], analysisCharts, analysisNews: newsAnalysis, universe };
+    clock: snapshot?.clock, plan: previous?.planNext, pending: [...pending], analysisCharts, analysisNews, universe };
   if (snapshot && chartAnalysis && newsAnalysis) {
     try { decision = await ask<Decision>(agents, "decide", context); }
     catch (error) { alerts.push(`Decisione mancante: ${errorText(error)}`); }

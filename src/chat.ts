@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { State } from "./state";
 
-type Kind = "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "scenario-grafici" | "ordine" | "allarmi";
+type Kind = "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "scenario-grafici" | "ordine" | "allarmi" | "watchlist";
 export type Message = {
   id: string;
   text: string;
@@ -39,12 +39,18 @@ export async function enqueue(state: State, run: string, kind: Kind, content: st
   await state.write(path, { id, kind, text: `run ${run}\n${content}` });
 }
 
-export async function flush(state: State, channel: Channel, now = new Date()) {
+export async function flush(state: State, channel: Channel, now?: Date) {
+  const currentTime = () => now ?? new Date();
   for (const file of await state.list("outbox")) {
     const path = `outbox/${file}`;
     const message = await state.read<Message>(path);
     if (!message || message.delivered) continue;
-    if (message.retryAt && Date.parse(message.retryAt) > +now) break;
+    // Elimina le richieste interattive rimaste in coda dalla versione precedente.
+    if (message.kind === "watchlist" && "buttons" in message && Array.isArray(message.buttons) && message.buttons.length) {
+      await state.remove(path);
+      continue;
+    }
+    if (message.retryAt && Date.parse(message.retryAt) > +currentTime()) break;
     message.attempts = (message.attempts ?? 0) + 1;
     delete message.retryAt;
     try {
@@ -52,13 +58,13 @@ export async function flush(state: State, channel: Channel, now = new Date()) {
         message.partsSent = partsSent;
         await state.write(path, message);
       });
-      message.delivered = now.toISOString();
+      message.delivered = currentTime().toISOString();
       delete message.error;
       console.log(`Messaggio ${message.id}: consegnato.`);
     } catch (error) {
       message.error = error instanceof Error ? error.message : "Errore di consegna.";
       if (message.attempts === 1) console.log(`Messaggio ${message.id}: in coda. ${message.error}`);
-      if (error instanceof RetryDelivery) message.retryAt = new Date(+now + error.seconds * 1000).toISOString();
+      if (error instanceof RetryDelivery) message.retryAt = new Date(+currentTime() + error.seconds * 1000).toISOString();
     }
     await state.write(path, message);
     if (message.retryAt) break;

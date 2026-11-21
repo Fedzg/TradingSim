@@ -13,12 +13,15 @@ const obj = (properties: Record<string, Schema>): Schema => ({
 });
 const choice = (...values: string[]) => ({ ...s, enum: values });
 const proposal = obj({ symbol: s, side: choice("buy", "sell"), qty, reason: s });
+const discoveryFinding = obj({ verdict: choice("approve", "reject"), reason: s, doubt: s, sourceIds: arr(s) });
 const schemas = {
   charts: obj({ ideas: arr(obj({ symbol: s, horizon: choice("15 minuti", "giornaliero"),
     bias: choice("rialzista", "ribassista", "laterale"), direction: s, evidence: s, invalidation: s, uncertainty: s })), limitations: arr(s) }),
   news: obj({ events: arr(obj({ title: s, source: s, link: s, published: s, symbols: arr(s), impact: s, classification: choice("fatto", "indiscrezione", "interpretazione") })),
     limitations: arr(s), newMarkets: arr(obj({ name: s, symbol: s, event: s, link: s, source: s, published: s, reason: s })) }),
   newsSignals: obj({ signals: arr(obj({ articleId: qty, symbols: arr(s), reason: s })) }),
+  discoveryNews: discoveryFinding,
+  discoveryCharts: discoveryFinding,
   decide: obj({ orders: arr(proposal), reasoning: s, planNext: s }),
   challenge: obj({ timing: s, invalidation: s, sizing: s, downside: s }),
   answer: obj({ timing: s, invalidation: s, sizing: s, downside: s, position: choice("confermo", "ritiro") }),
@@ -38,6 +41,8 @@ const instructions: Record<Role, string> = {
   charts: "Sei l’analista dei grafici. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Per ogni scenario seleziona un solo intervallo e un bias: rialzista o ribassista solo con evidenza nei dati; usa laterale quando il quadro è indeciso. Indica il motivo tecnico, un livello di invalidazione e le principali incertezze. Segnala ritardi e dati insufficienti. Evita probabilità numeriche e raccomandazioni. Analizza anche gli strumenti solo in monitoraggio.",
   news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Segnala dati vecchi, lacune ed eventuali nuovi mercati motivati.",
   newsSignals: "Seleziona al massimo tre notizie che potrebbero cambiare materialmente la valutazione di un ordine simulato. Cerca fatti specifici e nuovi come risultati, guidance, eventi regolatori, decisioni delle banche centrali o dati macro a sorpresa. Scarta indiscrezioni, commenti, resoconti del movimento del prezzo e collegamenti generici ai ticker. Usa solo gli articleId e i simboli consentiti dell’articolo. Spiega in una frase il nesso con gli strumenti selezionati e l’eventuale incertezza. Non suggerire ordini. Restituisci signals vuoto se nessuna notizia supera questa soglia.",
+  discoveryNews: "Sei l’analista delle notizie per la watchlist. Verifica corrispondenza esatta dello strumento, fonte, data e rilevanza. Distingui una notizia verificabile da un semplice movimento di mercato. Puoi confermare un candidato privo di notizie solo se la fonte di mercato identifica chiaramente lo strumento e il movimento è rilevante. Non inventare un catalizzatore. Cita solo sourceIds forniti.",
+  discoveryCharts: "Sei l’analista dei grafici per la watchlist. Verifica direzione, coerenza fra 60 minuti e giornaliero, ritardo, volume o sua assenza e invalidazione. Evidenzia se si tratta del sottostante, di un contratto o di una serie continua. Cita solo sourceIds forniti.",
   decide: "Sei il decisore. Proponi al massimo cinque ordini in azioni intere o nessun ordine. Motiva in 3–5 frasi anche l’assenza di ordini. Compila il piano per la prossima sveglia. Rispetta universo e limiti del conto.",
   challenge: "Sei il revisore indipendente e severo. Cerca prove contrarie e formula quattro domande specifiche su momento, invalidazione, quantità e scenario avverso per l’ordine immutabile.",
   answer: "Sei il decisore. Rispondi alle quattro obiezioni. Conferma integralmente l’ordine immutabile o ritiralo. Per variarlo occorre una nuova proposta e una nuova revisione.",

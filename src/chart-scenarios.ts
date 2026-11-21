@@ -1,5 +1,5 @@
 import type { Charts } from "./agents";
-import { universe, watched } from "./broker";
+import { universe } from "./broker";
 import type { Series } from "./market";
 
 const formats = {
@@ -13,7 +13,7 @@ export function chartScenarios(analysis: Charts, charts: Series[], now: Date) {
   const sections: string[] = [];
   for (const idea of analysis.ideas) {
     const key = `${idea.symbol}/${idea.horizon}`;
-    if (idea.bias === "laterale" || !watched.includes(idea.symbol) || seen.has(key)) continue;
+    if (idea.bias === "laterale" || seen.has(key)) continue;
     const series = charts.find(x => x.symbol === idea.symbol);
     const bars = series?.intervals[idea.horizon === "15 minuti" ? "15Min" : "1Day"];
     const last = bars?.at(-1);

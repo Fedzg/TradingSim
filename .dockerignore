@@ -4,3 +4,10 @@ secrets.ts
 .env*
 state*
 node_modules
+**/secrets.ts
+**/alpaca-key
+**/alpaca-secret
+**/.env*
+**/state
+**/state-fake
+**/watchlist.json

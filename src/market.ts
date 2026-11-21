@@ -13,13 +13,13 @@ async function json<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function yahoo(symbol: string, range: string, interval: string): Promise<Candle[]> {
+export async function yahoo(symbol: string, range: string, interval: string): Promise<Candle[]> {
   type Quote = Record<"open" | "high" | "low" | "close" | "volume", (number | null)[]>;
-  const data = await json<{ chart: { result: { timestamp: number[]; indicators: { quote: Quote[] } }[] } }>(
+  const data = await json<{ chart: { result: { meta?: { symbol?: string }; timestamp: number[]; indicators: { quote: Quote[] } }[] } }>(
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`,
   );
   const result = data.chart.result?.[0];
-  if (!result) throw new Error("Serie assente");
+  if (!result || (result.meta?.symbol && result.meta.symbol.toUpperCase() !== symbol.toUpperCase())) throw new Error("Serie assente o simbolo non corrispondente.");
   const q = result.indicators.quote[0];
   return result.timestamp.flatMap((stamp, i) => {
     const [o, h, l, c, v] = [q.open[i], q.high[i], q.low[i], q.close[i], q.volume?.[i] ?? null];
@@ -37,7 +37,7 @@ export function fakeCharts(now: Date): Series[] {
 }
 
 export class Market {
-  constructor(private mcp: Mcp | undefined, private fake: boolean) {}
+  constructor(private mcp: Mcp | undefined, private fake: boolean, private watchlist?: () => Promise<Series[]>) {}
 
   async charts(now: Date): Promise<Series[]> {
     if (this.fake) return fakeCharts(now);
@@ -56,14 +56,14 @@ export class Market {
         error: bars.some(b => b.length < 15) ? "Dati parziali o fonte indisponibile" : undefined,
         intervals: { "15Min": bars[0], "1Day": bars[1] } };
     }));
-    const [results, other] = await Promise.all([stocks.then(value => ({ value, error: undefined })).catch(() => ({ value: undefined, error: "Dati Alpaca IEX indisponibili" })), extras]);
+    const [results, other, discovered] = await Promise.all([stocks.then(value => ({ value, error: undefined })).catch(() => ({ value: undefined, error: "Dati Alpaca IEX indisponibili" })), extras, this.watchlist?.() ?? []]);
     return [...universe.map(symbol => {
       const intra = results.value?.[0].bars?.[symbol]?.slice(-48) ?? [];
       const daily = results.value?.[1].bars?.[symbol]?.slice(-48) ?? [];
       return { symbol, source: "Alpaca IEX", updated: intra.at(-1)?.t ?? daily.at(-1)?.t ?? null,
         error: results.error ?? (intra.length < 15 || daily.length < 15 ? "Dati insufficienti" : undefined),
         intervals: { "15Min": intra, "1Day": daily } };
-    }), ...other];
+    }), ...other, ...discovered];
   }
 
   async poll(state: State, now = new Date()): Promise<News> {
