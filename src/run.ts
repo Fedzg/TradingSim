@@ -6,6 +6,7 @@ import { orderReviewContext } from "./order-review-context";
 import { chartScenarios } from "./chart-scenarios";
 import { enqueue } from "./chat";
 import { queueOrder } from "./notifications";
+import { OrderRejected } from "./mcp";
 import { miniChart, type Market, type News, type Series } from "./market";
 import { limitFor, risk, stops, terminal, ticketFor, trading } from "./risk";
 import { type Baton, type RunLock, State } from "./state";
@@ -62,7 +63,11 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
 
   async function reconcile(intent: Intent) {
     try {
-      const order = await broker.find(intent.id);
+      let order = await broker.find(intent.id);
+      if (!order && intent.submissionRejection) {
+        order = { client_order_id: intent.id, symbol: intent.order.symbol, side: intent.order.side,
+          qty: String(intent.order.qty), limit_price: intent.limit?.toString() ?? null, status: "rejected", filled_qty: "0" };
+      }
       if (order) {
         if (order.status !== intent.observed?.status || Number(order.filled_qty) !== Number(intent.observed?.filled_qty)) {
           await notifyOrder(order, intent);
@@ -141,6 +146,10 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       if (!terminal.has(result.status)) pending.add(id);
     } catch (error) {
       alerts.push(`Risposta all’invio ${id}: ${errorText(error)}`);
+      if (error instanceof OrderRejected) {
+        intent.submissionRejection = error.message;
+        await state.write(`intents/${id}.json`, intent);
+      }
       await reconcile(intent);
     }
   }
@@ -166,16 +175,39 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   } catch (error) { alerts.push(`Notizie indisponibili: ${errorText(error)}`); }
 
   const monitored = [...new Set([...watched, ...charts.map(series => series.symbol)])];
+  const newsInput = news && {
+    ...news,
+    articles: news.articles.slice(0, 30).map(article => ({
+      ...article, summary: Array.from(article.summary).slice(0, 180).join(""),
+    })),
+  };
+  const chartInput = chartContext(charts, now);
   const analysts = await Promise.allSettled([
-    ask<Charts>(agents, "charts", chartContext(charts, now)),
-    ask<NewsAnalysis>(agents, "news", { now, news: news && { ...news, articles: news.articles.slice(0, 30).map(article => ({ ...article, summary: article.summary.slice(0, 320) })) }, watched: monitored }),
+    ask<Charts>(agents, "charts", chartInput),
+    ask<NewsAnalysis>(agents, "news", { now, news: newsInput, watched: monitored }),
   ]);
   if (analysts[0].status === "fulfilled") chartAnalysis = analysts[0].value;
   else alerts.push(`Analisi grafici mancante: ${errorText(analysts[0].reason)}`);
   if (analysts[1].status === "fulfilled") newsAnalysis = analysts[1].value;
   else alerts.push(`Analisi notizie mancante: ${errorText(analysts[1].reason)}`);
 
-  for (const series of charts) {
+  for (const [index, series] of charts.entries()) {
+    if (series.source === "Alpaca IEX") {
+      const { intervals } = chartInput.charts[index];
+      const closed = snapshot?.clock.is_open === false;
+      const details = (["15Min", "1Day"] as const).map(interval => {
+        const data = intervals[interval];
+        const stale = interval === "15Min" && data.lastClosed
+          ? +now - Date.parse(data.lastClosed) > 45 * 60_000 : data.stale;
+        const status = data.feedError ?? (!data.lastClosed ? "serie assente" :
+          stale ? "dato datato" : data.count < 15 ? "serie breve" : "recente");
+        return { status, text: `${interval} ${status} (ultima candela chiusa: ${data.lastClosed ?? "assente"})` };
+      });
+      if (closed || details.some(detail => detail.status !== "recente")) {
+        note(`${series.symbol} (${series.source}): ${closed ? "mercato chiuso. " : ""}${details.map(detail => detail.text).join(". ")}.`);
+      }
+      continue;
+    }
     if (series.error || !series.updated || +now - Date.parse(series.updated) > 45 * 60_000) {
       note(`${series.symbol} (${series.source}): ${series.error ?? "dati intraday non recenti"}; ultimo dato ${series.updated ?? "assente"}.`);
     }
@@ -258,6 +290,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   const toCheck = redact([decision?.planNext ?? previous?.planNext ?? "Verificare conto, posizioni e fonti.",
     ...alerts, ...[...pending].map(id => `Ricontrollare ${id} su Alpaca.`)].join("\n"));
   note(`Piano: ${toCheck.split("\n")[0]}\nProssima sveglia: ${nextWake(new Date(Math.max(+now, Date.now())))} (ora di Roma).`);
+  for (const alert of alerts) note("⚠ " + alert);
   const baton: Baton = { wake: entry, savedAt: new Date().toISOString(), planNext: toCheck, report: lines.join("\n"), pending: [...pending] };
   const event = `${entry.id}-${crypto.randomUUID()}.json`;
   await state.write(`history/${event}`, baton);
@@ -268,5 +301,5 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   if (alerts.length) await enqueue(state, entry.id, "allarmi", redact(`⚠ ${alerts.join("\n⚠ ")}`));
   if (!previous || previous.wake.id <= entry.id) await state.write("baton.json", baton);
   await state.remove("run.lock");
-  console.log(`run ${entry.id}\n${baton.report}${alerts.length ? "\n⚠ " + redact(alerts.join("\n⚠ ")) : ""}`);
+  console.log(`run ${entry.id}\n${baton.report}`);
 }

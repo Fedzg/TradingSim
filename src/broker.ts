@@ -7,7 +7,7 @@ export type BrokerOrder = {
   client_order_id: string; symbol: string; side: Side; qty: string; filled_qty: string;
   status: string; limit_price: string | null;
 };
-export type Intent = { id: string; order: Proposal; limit: number | null; attemptedAt: string; observed?: BrokerOrder };
+export type Intent = { id: string; order: Proposal; limit: number | null; attemptedAt: string; submissionRejection?: string; observed?: BrokerOrder };
 export type Account = { equity: string; last_equity: string; cash: string; buying_power: string; trading_blocked: boolean };
 export type Position = { symbol: string; qty: string; qty_available: string; avg_entry_price: string; current_price: string; market_value: string };
 export type Snapshot = { account: Account; positions: Position[]; orders: BrokerOrder[]; clock: { is_open: boolean; timestamp: string } };
@@ -51,20 +51,28 @@ export class Alpaca implements Broker {
       payload<Snapshot["clock"]>(this.mcp, "get_clock"),
     ]);
     const open = await payload<BrokerOrder[]>(this.mcp, "get_orders", { status: "open", limit: 500 });
-    if (!Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(open) ||
-        typeof clock.is_open !== "boolean" || !Number.isFinite(Date.parse(clock.timestamp))) {
-      throw new Error("Alpaca MCP: snapshot non valido.");
+    if (!Array.isArray(positions)) throw new Error("Alpaca MCP: get_all_positions, elenco posizioni non valido.");
+    if (!Array.isArray(orders)) throw new Error("Alpaca MCP: get_orders (all), elenco ordini non valido.");
+    if (!Array.isArray(open)) throw new Error("Alpaca MCP: get_orders (open), elenco ordini non valido.");
+    if (typeof clock.is_open !== "boolean" || typeof clock.timestamp !== "string" || !Number.isFinite(Date.parse(clock.timestamp))) {
+      throw new Error("Alpaca MCP: get_clock, orologio non valido.");
     }
     if (orders.length >= 500 || open.length >= 500) throw new Error("Alpaca MCP: elenco ordini potenzialmente incompleto.");
     return {
       account,
-      positions: positions.map(({ symbol, qty, qty_available, avg_entry_price, current_price, market_value }) => {
+      positions: positions.map(position => {
+        const { symbol, qty, qty_available, avg_entry_price, current_price, market_value } = position ?? {};
         if (typeof symbol !== "string" || !symbol || ![qty, qty_available, avg_entry_price, current_price, market_value].every(decimal)) {
-          throw new Error("Alpaca MCP: dati delle posizioni non verificabili.");
+          throw new Error("Alpaca MCP: get_all_positions, dati delle posizioni non verificabili.");
         }
         return { symbol, qty, qty_available, avg_entry_price, current_price, market_value };
       }),
-      orders: [...new Map([...orders, ...open].map(x => [x.client_order_id, brokerFields(x)])).values()],
+      orders: [...new Map([...orders, ...open].map(item => {
+        try {
+          const order = brokerFields(item);
+          return [order.client_order_id, order] as const;
+        } catch { throw new Error("Alpaca MCP: get_orders, dati ordine non verificabili."); }
+      })).values()],
       clock: { is_open: clock.is_open, timestamp: clock.timestamp },
     };
   }

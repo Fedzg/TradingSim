@@ -258,3 +258,156 @@ test("G9: scenari validati e deduplicati, chart-report fake resta di sola lettur
   expect((await f.messages()).filter(x => x?.kind === "scenario-grafici")).toHaveLength(2);
   expect(await f.orders()).toEqual([]);
 });
+
+for (const [fault, detail, orderStatus] of [
+  ["review-down", "Revisore indisponibile"],
+  ["review-schema", "Risposta non valida dal ruolo review"],
+  ["account-error", "get_account_info"],
+  ["account-invalid", "conto non valida"],
+  ["positions", "get_all_positions"],
+  ["all", "get_orders"],
+  ["open", "get_orders"],
+  ["clock", "get_clock"],
+  ["position-row", "get_all_positions"],
+  ["order-row", "get_orders"],
+  ["lookup-500", "HTTP 500"],
+  ["lookup-ambiguous", "HTTP 500"],
+  ["lookup-404", "accettato", "accepted"],
+  ["rejected", "respinto", "rejected"],
+] as const) {
+  test(`Audit worker ${fault}`, async () => {
+    const f = await fixture();
+    const result = await f.once("audit", { AUDIT_FAULT: fault }).outcome;
+    const trace = await Bun.file(f.state.path("audit.trace")).text();
+    const baton = (await f.state.baton()).baton!;
+    const orders = await f.orders();
+    const intents = await f.state.intents();
+    const notifications = await f.state.list("fake-chat");
+    console.log("AUDIT", JSON.stringify({ fault, code: result.code, orders: orders.length, intents: intents.length,
+      notifications: notifications.length, wake: baton.wake.id, observed: intents[0]?.observed?.status }));
+    expect(result.code).toBe(0);
+    expect(baton.report).toContain(detail);
+    expect(trace.split("\n").filter(line => line.startsWith("place_stock_order "))).toHaveLength(orderStatus ? 1 : 0);
+    expect(orders).toHaveLength(orderStatus ? 1 : 0);
+    expect(notifications).toHaveLength(orders.length);
+    if (fault.startsWith("review-")) expect(trace).toContain("decide\nchallenge\nanswer\nreview");
+    if (orderStatus) {
+      expect(intents[0].observed).toMatchObject({ client_order_id: orders[0].client_order_id, status: orderStatus, filled_qty: "0" });
+      expect(baton.report).not.toContain("eseguite 2/2");
+    }
+  });
+}
+
+for (const corruption of ["troncato", "campi invalidi", "data impossibile"]) {
+  test(`Audit recupero baton ${corruption}`, async () => {
+    const f = await fixture();
+    expect((await f.once().outcome).code).toBe(0);
+    const before = await f.orders();
+    const [intent] = await f.state.intents();
+    const old = (await f.state.baton()).baton!;
+    await f.state.write(`intents/${intent.id}.json`, { ...intent, observed: undefined });
+    await Bun.write(f.state.path("baton.json"), corruption === "troncato" ? '{"wake":' :
+      JSON.stringify(corruption === "data impossibile" ? { ...old, wake: wake("2026-99-44", "15:40") } : { ...old, report: 42, pending: "??" }));
+    const recovery = await f.once("audit").outcome;
+    const trace = await Bun.file(f.state.path("audit.trace")).text();
+    const recovered = (await f.state.baton()).baton!;
+    const restarted = await f.once().outcome;
+    const notifications = await f.state.list("fake-chat");
+    console.log("AUDIT", JSON.stringify({ corruption, codes: [recovery.code, restarted.code], id: intent.id,
+      before: before.length, after: (await f.orders()).length, notifications: notifications.length }));
+    expect(recovery.code).toBe(0);
+    expect(recovery.out).toContain("Testimone corrotto");
+    expect(trace.indexOf("get_order_by_client_id " + intent.id)).toBe(0);
+    expect(trace).toContain("decide");
+    expect(trace).not.toContain("place_stock_order");
+    expect(recovered.wake).toEqual(old.wake);
+    expect((await f.state.intents())[0].observed?.client_order_id).toBe(intent.id);
+    expect(restarted.code).toBe(0);
+    expect(await f.orders()).toEqual(before);
+    expect(notifications).toHaveLength(1);
+  });
+}
+
+test("Audit scheduler riparte alle 21:40 Roma dopo due slot saltati", async () => {
+  const f = await fixture();
+  const prior = wake("2026-11-20", "09:00");
+  await f.state.write("baton.json", { wake: prior, savedAt: "2026-11-20T08:00:00Z", report: "", planNext: "", pending: [] });
+  await f.state.write("fake-open.json", false);
+  const before = await f.orders();
+  const clock = join(f.base, "clock");
+  await Bun.write(clock, String(Date.parse("2026-11-20T20:40:00Z")));
+  await f.state.write("test-scan-resume.json", true);
+  const scheduler = f.command(["schedule"], "", {
+    BUN_OPTIONS: "--preload=" + join(fixtureFiles, "efficiency-scheduler-preload.ts"), TEST_SCHEDULER_CLOCK: clock,
+  });
+  try {
+    await until(async () => (await f.state.baton()).baton?.wake.slot === "21:40" || undefined);
+  } finally { scheduler.proc.kill("SIGTERM"); }
+  const result = await scheduler.outcome;
+  const logs = await f.state.list("history");
+  const baton = (await f.state.baton()).baton!;
+  console.log("AUDIT", JSON.stringify({ fault: "missed", code: result.code, before: before.length, after: (await f.orders()).length, logs }));
+  expect(result.code).toBe(0);
+  expect(baton.planNext).toContain("Sveglie saltate (ora di Roma): 2026-11-20 15:40, 2026-11-20 18:30.");
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toStartWith("2026-11-20-2140-");
+  expect(await f.orders()).toEqual(before);
+});
+
+for (const [fault, command, reason] of [
+  ["news-timeout", "exec sleep 20", "timeout dopo 150 s"],
+  ["news-quota", "echo 'usage_limit_reached PRIVATE-MARKER' >&2; exit 1", "limite di utilizzo"],
+  ["news-auth", "echo 'HTTP 401 PRIVATE-MARKER' >&2; exit 1", "autenticazione"],
+]) {
+  test(`Audit worker ${fault}`, async () => {
+    const f = await fixture();
+    const codex = join(f.base, "codex");
+    await Bun.write(codex, "#!/bin/sh\n" + command + "\n");
+    await chmod(codex, 0o700);
+    const outcome = await f.once("audit", { AUDIT_FAULT: fault, PATH: f.base + ":" + process.env.PATH }).outcome;
+    const baton = (await f.state.baton()).baton!;
+    const trace = await Bun.file(f.state.path("audit.trace")).text();
+    expect(outcome.code).toBe(0);
+    expect(outcome.err).toContain(reason);
+    expect(outcome.err + outcome.out).not.toContain("PRIVATE-MARKER");
+    expect(baton.report).toContain("SPY (giornaliero): Laterale");
+    expect(baton.planNext).toContain(reason);
+    expect(trace).not.toMatch(/decide|place_stock_order/);
+    expect(await f.orders()).toHaveLength(0);
+    expect(await f.state.list("fake-chat")).toHaveLength(0);
+  });
+}
+
+test("Audit risposta persa e lookup indisponibile fino al riavvio", async () => {
+  const f = await fixture();
+  const first = await f.once("audit", { AUDIT_FAULT: "lost" }).outcome;
+  const [order] = await f.orders();
+  expect(first.code).toBe(0);
+  expect(first.out).toContain("esito non verificato");
+  expect((await f.state.intents())[0].observed).toBeUndefined();
+  expect(order).toMatchObject({ status: "accepted", filled_qty: "0" });
+  const retry = await f.once("audit").outcome;
+  const trace = await Bun.file(f.state.path("audit.trace")).text();
+  expect(retry.code).toBe(0);
+  expect(trace.split("place_stock_order " + order.client_order_id)).toHaveLength(2);
+  expect(retry.out).not.toContain("eseguite 2/2");
+  expect((await f.state.intents())[0].observed).toEqual(order);
+  expect(await f.orders()).toEqual([order]);
+  expect(await f.state.list("fake-chat")).toHaveLength(1);
+});
+
+test("Audit rifiuto esplicito del broker senza ordine creato", async () => {
+  const f = await fixture();
+  const first = await f.once("audit", { AUDIT_FAULT: "buying-power" }).outcome;
+  const baton = (await f.state.baton()).baton!;
+  const retry = await f.once("audit").outcome;
+  const trace = await Bun.file(f.state.path("audit.trace")).text();
+  expect(first.code).toBe(0);
+  expect(retry.code).toBe(0);
+  expect(trace.match(/place_stock_order/g)).toHaveLength(1);
+  expect(await f.orders()).toEqual([]);
+  expect(baton.report).toContain("potere di acquisto insufficiente");
+  expect(baton.pending).toEqual([]);
+  expect((await f.state.intents())[0].observed).toMatchObject({ status: "rejected", filled_qty: "0" });
+  expect(await f.state.list("fake-chat")).toHaveLength(1);
+});

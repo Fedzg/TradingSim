@@ -6,8 +6,8 @@ import type { News } from "./market";
 
 const s = { type: "string" };
 const qty = { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
-const arr = (items: Schema) => ({ type: "array", items });
-type Schema = { type: string; properties?: Record<string, Schema>; required?: string[]; additionalProperties?: boolean; items?: Schema; enum?: string[]; minimum?: number; maximum?: number };
+const arr = (items: Schema, maxItems?: number) => ({ type: "array", items, maxItems });
+type Schema = { type: string; properties?: Record<string, Schema>; required?: string[]; additionalProperties?: boolean; items?: Schema; maxItems?: number; enum?: string[]; minimum?: number; maximum?: number };
 const obj = (properties: Record<string, Schema>): Schema => ({
   type: "object", properties, additionalProperties: false, required: Object.keys(properties),
 });
@@ -17,8 +17,8 @@ const discoveryFinding = obj({ verdict: choice("approve", "reject"), reason: s, 
 const schemas = {
   charts: obj({ ideas: arr(obj({ symbol: s, horizon: choice("15 minuti", "giornaliero"),
     bias: choice("rialzista", "ribassista", "laterale"), direction: s, evidence: s, invalidation: s, uncertainty: s })), limitations: arr(s) }),
-  news: obj({ events: arr(obj({ title: s, source: s, link: s, published: s, symbols: arr(s), impact: s, classification: choice("fatto", "indiscrezione", "interpretazione") })),
-    limitations: arr(s), newMarkets: arr(obj({ name: s, symbol: s, event: s, link: s, source: s, published: s, reason: s })) }),
+  news: obj({ events: arr(obj({ title: s, source: s, link: s, published: s, symbols: arr(s), impact: s, classification: choice("fatto", "indiscrezione", "interpretazione") }), 6),
+    limitations: arr(s), newMarkets: arr(obj({ name: s, symbol: s, event: s, link: s, source: s, published: s, reason: s }), 2) }),
   newsSignals: obj({ signals: arr(obj({ articleId: qty, symbols: arr(s), reason: s })) }),
   discoveryNews: discoveryFinding,
   discoveryCharts: discoveryFinding,
@@ -44,7 +44,7 @@ export type Approval = { ticket: string; review: Review };
 
 const instructions: Record<Role, string> = {
   charts: "Sei l’analista dei grafici. Usa gli indicatori calcolati e le candele chiuse; i campi null sono lacune. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Per ogni scenario seleziona un solo intervallo e un bias: rialzista o ribassista solo con evidenza nei dati; usa laterale quando il quadro è indeciso. Indica il motivo tecnico, un livello di invalidazione e le principali incertezze. Segnala ritardi e dati insufficienti. Evita probabilità numeriche e raccomandazioni. Analizza anche gli strumenti solo in monitoraggio.",
-  news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Segnala dati vecchi, lacune ed eventuali nuovi mercati motivati.",
+  news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Restituisci al massimo 6 eventi pertinenti (events) e 2 nuovi mercati motivati (newMarkets). Usa una sola frase breve per ciascun impatto (impact) e ciascun motivo (reason). Usa array vuoti se non emerge nulla di rilevante. Segnala brevemente dati vecchi e lacune.",
   newsSignals: "Seleziona al massimo tre notizie che potrebbero cambiare materialmente la valutazione di un ordine simulato. Cerca fatti specifici e nuovi come risultati, guidance, eventi regolatori, decisioni delle banche centrali o dati macro a sorpresa. Scarta indiscrezioni, commenti, resoconti del movimento del prezzo e collegamenti generici ai ticker. Usa solo gli articleId e i simboli consentiti dell’articolo. Spiega in una frase il nesso con gli strumenti selezionati e l’eventuale incertezza. Non suggerire ordini. Restituisci signals vuoto se nessuna notizia supera questa soglia.",
   discoveryNews: "Sei l’analista delle notizie per la watchlist. Verifica corrispondenza esatta dello strumento, fonte, data e rilevanza. Distingui una notizia verificabile da un semplice movimento di mercato. Puoi confermare un candidato privo di notizie solo se la fonte di mercato identifica chiaramente lo strumento e il movimento è rilevante. Non inventare un catalizzatore. Cita solo sourceIds forniti.",
   discoveryCharts: "Sei l’analista dei grafici per la watchlist. Verifica direzione, coerenza fra 60 minuti e giornaliero, ritardo, volume o sua assenza e invalidazione. Evidenzia se si tratta del sottostante, di un contratto o di una serie continua. Cita solo sourceIds forniti.",
@@ -61,7 +61,7 @@ const instructions: Record<Role, string> = {
 function valid(schema: Schema, value: unknown): boolean {
   if (schema.type === "string") return typeof value === "string" && value.trim().length > 0 && (!schema.enum || schema.enum.includes(value));
   if (schema.type === "integer") return typeof value === "number" && Number.isSafeInteger(value) && value >= (schema.minimum ?? 0) && value <= (schema.maximum ?? Infinity);
-  if (schema.type === "array") return Array.isArray(value) && value.every(x => valid(schema.items!, x));
+  if (schema.type === "array") return Array.isArray(value) && value.length <= (schema.maxItems ?? Infinity) && value.every(x => valid(schema.items!, x));
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const fields = value as Record<string, unknown>;
   const entries = Object.entries(schema.properties!);
@@ -75,11 +75,35 @@ export async function ask<T>(agents: Agents, role: Role, input: unknown): Promis
   return value as T;
 }
 
+function exitReason(code: number, stderr: string) {
+  if (/usage[_ -]limit|rate[_ -]limit|insufficient_quota|(?:exceeded|exhausted).{0,32}quota|quota.{0,32}(?:exhausted|exceeded)|too many requests|(?:(?:status(?: code)?|http(?:\/\d(?:\.\d)?)?|response)\s*[:=]?\s*429\b)|429\s+Too Many Requests/i.test(stderr)) {
+    return "limite di utilizzo o frequenza raggiunto";
+  }
+  if (/unauthori[sz]ed|authentication (?:error|failed|required)|not (?:logged|signed) in|login required|invalid[_ -]api[_ -]key|(?:invalid|expired) (?:access |refresh )?token|token.{0,24}(?:expired|revoked|already used)|could not be refreshed|(?:(?:status(?: code)?|http(?:\/\d(?:\.\d)?)?|response)\s*[:=]?\s*401\b)/i.test(stderr)) {
+    return "errore di autenticazione";
+  }
+  return `codice di uscita ${code}`;
+}
+
+async function readStderr(stream: ReadableStream<Uint8Array>, signal: AbortSignal) {
+  const decoder = new TextDecoder();
+  let tail = "";
+  // Drena la pipe mentre Codex gira e conserva solo una coda limitata in memoria.
+  await stream.pipeTo(new WritableStream({
+    write(chunk) { tail = (tail + decoder.decode(chunk, { stream: true })).slice(-16_384); },
+  }), { signal }).catch(() => {});
+  return tail + decoder.decode();
+}
+
+class CodexFailure extends Error {}
+
 export class CodexAgents implements Agents {
   constructor(private redact: (value: string) => string) {}
   async invoke(role: Role, input: unknown): Promise<unknown> {
-    const dir = await mkdtemp(join(tmpdir(), "tradingsim-agent-"));
+    const started = performance.now();
+    let dir: string | undefined;
     try {
+      dir = await mkdtemp(join(tmpdir(), "tradingsim-agent-"));
       const schema = join(dir, "schema.json");
       const result = join(dir, "result.json");
       await writeFile(schema, JSON.stringify(schemas[role]), { mode: 0o600 });
@@ -98,11 +122,34 @@ export class CodexAgents implements Agents {
       const proc = Bun.spawn([...launcher, "codex", "--ask-for-approval", "never", "exec", ...modelArgs, "--ephemeral", "--skip-git-repo-check",
         "--ignore-user-config", "-c", "features.shell_tool=false", "-c", 'web_search="disabled"',
         "--sandbox", "read-only", "--output-schema", schema, "--output-last-message", result, "-"], {
-        cwd: dir, env, stdin: new Blob([prompt]), stdout: "ignore", stderr: "ignore", timeout: 120_000, killSignal: "SIGKILL",
+        cwd: dir, env, stdin: new Blob([prompt]), stdout: "ignore", stderr: "pipe",
       });
-      if (await proc.exited !== 0) throw new Error(`codex exec non riuscito per ${role}.`);
-      return JSON.parse(this.redact(await Bun.file(result).text()));
-    } finally { await rm(dir, { recursive: true, force: true }); }
+      const timeoutMs = role === "news" ? 150_000 : 120_000;
+      const capture = new AbortController();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          timedOut = true;
+          proc.kill("SIGKILL");
+        }
+        capture.abort();
+      }, timeoutMs);
+      try {
+        const [code, stderr] = await Promise.all([proc.exited, readStderr(proc.stderr, capture.signal)]);
+        if (timedOut) throw new CodexFailure(`timeout dopo ${timeoutMs / 1000} s`);
+        if (code !== 0) throw new CodexFailure(exitReason(code, stderr));
+      } finally { clearTimeout(timer); }
+
+      try { return JSON.parse(this.redact(await Bun.file(result).text())); }
+      catch { throw new CodexFailure("output JSON non disponibile o non valido"); }
+    } catch (error) {
+      const reason = error instanceof CodexFailure ? error.message : "avvio o I/O non riuscito";
+      const message = `codex exec ${role}: ${reason} (${Math.round(performance.now() - started)} ms).`;
+      console.error(message);
+      throw new Error(message);
+    } finally {
+      if (dir) await rm(dir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -125,7 +172,7 @@ export class FakeAgents implements Agents {
       case "charts": return { ideas: ["SPY", "USOIL", "GBP/USD"].map(symbol => ({ symbol, horizon: "giornaliero", bias: "laterale", direction: "Laterale", evidence: "Candele finte", invalidation: "Rottura del range", uncertainty: "Alta" })), limitations: [] };
       case "news": {
         const articles = (input as { news?: News } | undefined)?.news?.articles ?? [];
-        return { events: articles.map(article => ({ title: article.title, source: article.source, link: article.link,
+        return { events: articles.slice(0, 6).map(article => ({ title: article.title, source: article.source, link: article.link,
           published: article.published, symbols: article.symbols, impact: "Impatto macro simulato.", classification: "interpretazione" })),
           limitations: [], newMarkets: [] };
       }

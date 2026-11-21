@@ -9,17 +9,27 @@ export type McpResult = {
 export interface Mcp { call(name: string, args?: object): Promise<McpResult> }
 
 export class McpError extends Error {
-  constructor(tool: string, readonly notFound = false) {
-    super(`Alpaca MCP: ${tool} ${notFound ? "risorsa non trovata (404)" : "ha restituito un errore"}.`);
+  constructor(tool: string, readonly notFound = false, status?: number) {
+    super(`Alpaca MCP: ${tool} ${notFound ? "risorsa non trovata (404)" : "ha restituito un errore" + (status ? ` (HTTP ${status})` : "")}.`);
   }
 }
+
+export class OrderRejected extends Error {}
 
 export async function payload<T>(mcp: Mcp, tool: string, args?: object): Promise<T> {
   const result = await mcp.call(tool, args);
   const blocks = result.content?.filter(x => x.type === "text") ?? [];
   if (result.isError) {
-    const notFound = blocks.some(x => /\b404(?::| )\s*Not Found\b|\b40410000\b/i.test(x.text ?? ""));
-    throw new McpError(tool, notFound);
+    const statuses = blocks.flatMap(block => {
+      const message = block.text ?? "";
+      const match = /\bHTTP(?: error| status(?: code)?)?\s*[:=]?\s*([45]\d{2})\b|\b(?:client|server) error ['"]([45]\d{2})\b/i.exec(message);
+      if (match) return [Number(match[1] ?? match[2])];
+      if (/^404[: ]+Not Found\b/i.test(message.trim())) return [404];
+      try { if (JSON.parse(message)?.code === 40410000) return [404]; } catch {}
+      return [];
+    });
+    const status = statuses.find(code => code !== 404) ?? statuses[0];
+    throw new McpError(tool, status === 404 && statuses.length === blocks.length, status);
   }
   let value = result.structuredContent;
   if (value === undefined) {
@@ -29,7 +39,17 @@ export async function payload<T>(mcp: Mcp, tool: string, args?: object): Promise
   }
   if (value && typeof value === "object" && "_alpaca_mcp_security" in value && "data" in value) value = value.data;
   if (value && typeof value === "object" && "result" in value && Object.keys(value).length === 1) value = value.result;
-  if (value === null || typeof value !== "object" || "error" in value) throw new McpError(tool);
+  if (value === null || typeof value !== "object") throw new McpError(tool);
+  if ("error" in value) {
+    const error = value.error as { http_status?: number; detail?: { code?: number; message?: string } } | null;
+    // A duplicate ID or a transport failure can still refer to a live order.
+    // Only the specific buying-power rejection is definitive without an order record.
+    if (tool === "place_stock_order" && error?.http_status === 403 && error.detail?.code === 40310000 &&
+        typeof error.detail.message === "string" && /^insufficient buying power\b/i.test(error.detail.message)) {
+      throw new OrderRejected("Alpaca MCP: place_stock_order respinto (HTTP 403), potere di acquisto insufficiente.");
+    }
+    throw new McpError(tool);
+  }
   return value as T;
 }
 

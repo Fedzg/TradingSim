@@ -3,7 +3,7 @@ import { McpError, payload, type Mcp } from "./mcp";
 import type { State } from "./state";
 
 type Candle = { t: string; o: number; h: number; l: number; c: number; v: number | null };
-export type Series = { symbol: string; source: string; updated: string | null; error?: string; intervals: Record<string, Candle[]> };
+export type Series = { symbol: string; source: string; updated: string | null; error?: string; intervalErrors?: Partial<Record<"15Min" | "1Day", string>>; intervals: Record<string, Candle[]> };
 export type Article = { title: string; link: string; source: string; published: string; symbols: string[]; summary: string };
 export type News = { lastSuccess: string | null; checked: string; error?: string; articles: Article[] };
 
@@ -41,7 +41,7 @@ export class Market {
 
   async charts(now: Date): Promise<Series[]> {
     if (this.fake) return fakeCharts(now);
-    const stocks = Promise.all(["15Min", "1Day"].map(async interval => {
+    const stocks = Promise.allSettled((["15Min", "1Day"] as const).map(async interval => {
       const since = new Date(+now - (interval === "15Min" ? 5 : 75) * 86400_000).toISOString();
       type Bar = Omit<Candle, "v"> & { v: number };
       return payload<{ bars: Record<string, Bar[]> }>(this.mcp!, "get_stock_bars", {
@@ -56,13 +56,23 @@ export class Market {
         error: bars.some(b => b.length < 15) ? "Dati parziali o fonte indisponibile" : undefined,
         intervals: { "15Min": bars[0], "1Day": bars[1] } };
     }));
-    const [results, other, discovered] = await Promise.all([stocks.then(value => ({ value, error: undefined })).catch(() => ({ value: undefined, error: "Dati Alpaca IEX indisponibili" })), extras, this.watchlist?.() ?? []]);
+    const [results, other, discovered] = await Promise.all([stocks, extras, this.watchlist?.() ?? []]);
     return [...universe.map(symbol => {
-      const intra = results.value?.[0].bars?.[symbol]?.slice(-48) ?? [];
-      const daily = results.value?.[1].bars?.[symbol]?.slice(-48) ?? [];
-      return { symbol, source: "Alpaca IEX", updated: intra.at(-1)?.t ?? daily.at(-1)?.t ?? null,
-        error: results.error ?? (intra.length < 15 || daily.length < 15 ? "Dati insufficienti" : undefined),
-        intervals: { "15Min": intra, "1Day": daily } };
+      const intervalErrors: Series["intervalErrors"] = {};
+      const bars = (index: number, interval: "15Min" | "1Day") => {
+        const result = results[index];
+        if (result.status === "fulfilled") {
+          const data = result.value.bars;
+          if (data && typeof data === "object" && !Array.isArray(data)) {
+            if (!(symbol in data)) return [];
+            if (Array.isArray(data[symbol])) return data[symbol].slice(-48);
+          }
+        }
+        intervalErrors[interval] = "errore del feed IEX";
+        return [];
+      };
+      const intervals = { "15Min": bars(0, "15Min"), "1Day": bars(1, "1Day") };
+      return { symbol, source: "Alpaca IEX", updated: intervals["15Min"].at(-1)?.t ?? null, intervals, intervalErrors };
     }), ...other, ...discovered];
   }
 

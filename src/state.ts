@@ -55,9 +55,13 @@ export class State {
   async baton() {
     try {
       const baton = await this.read<Baton>("baton.json");
-      if (baton && (!/^\d{4}-\d{2}-\d{2}$/.test(baton.wake.date) ||
+      if (baton === undefined) return { baton };
+      const date = baton?.wake?.date;
+      const day = new Date(date + "T00:00:00Z");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(+day) || day.toISOString().slice(0, 10) !== date ||
         !slots.includes(baton.wake.slot) || wake(baton.wake.date, baton.wake.slot).id !== baton.wake.id ||
-        !Number.isFinite(Date.parse(baton.savedAt)) || typeof baton.planNext !== "string")) {
+        typeof baton.savedAt !== "string" || !Number.isFinite(Date.parse(baton.savedAt)) || typeof baton.planNext !== "string" ||
+        typeof baton.report !== "string" || !Array.isArray(baton.pending) || !baton.pending.every(id => typeof id === "string")) {
         throw new SyntaxError("testimone non valido");
       }
       return { baton };

@@ -91,6 +91,35 @@ test("posizione a -4%: stop obbligatorio nonostante il decisore rimanga fermo", 
   expect((await f.broker.orders())[0]).toMatchObject({ client_order_id: "2026-09-24-1540-SPY-sell", side: "sell", qty: "3" });
 });
 
+test("news riceve 30 riassunti compatti; cache intatta e nessun ordine discrezionale se fallisce", async () => {
+  const base = new FakeAgents();
+  const calls: Role[] = [];
+  const articles: Article[] = Array.from({ length: 34 }, (_, index) => ({
+    title: `Notizia ${index}`, link: `https://example.com/${index}`, source: "Fonte finta",
+    published: now.toISOString(), symbols: ["SPY"], summary: "x".repeat(179) + "📰" + "y".repeat(200),
+  }));
+  let received: News | undefined;
+  const f = await fixture({ async invoke(role, input) {
+    calls.push(role);
+    if (role === "news") {
+      received = (input as { news: News }).news;
+      throw new Error("Analisi indisponibile per il test");
+    }
+    return base.invoke(role, input);
+  } });
+  const cached = { lastSuccess: now.toISOString(), checked: now.toISOString(), articles };
+  await f.state.write("news.json", cached);
+  await f.start();
+  expect(calls).toContain("charts");
+  expect(calls).not.toContain("decide");
+  expect(await f.broker.orders()).toEqual([]);
+  expect((await f.state.baton()).baton!.report).toContain("SPY (giornaliero): Laterale");
+  expect(received?.articles).toEqual(articles.slice(0, 30).map(article => ({
+    ...article, summary: "x".repeat(179) + "📰",
+  })));
+  expect(await f.state.read("news.json")).toEqual(cached);
+});
+
 test("testimone corrotto: prosegue e segnala l’errore", async () => {
   const f = await fixture();
   await writeFile(f.state.path("baton.json"), "{");
@@ -324,3 +353,63 @@ test("guasto MCP dopo invio: riconcilia lo stesso ID senza reinviare", async () 
   expect((await f.broker.orders())[0].client_order_id).toBe("2026-09-24-1540-SPY-buy");
   expect((await f.state.intents())[0].observed?.status).toBe("accepted");
 });
+
+for (const fault of ["empty", "stale", "15Min", "1Day", "closed"]) {
+  test(`Audit IEX SPY QQQ TLT ${fault}`, async () => {
+    const charts = fakeCharts(now);
+    const symbols = ["SPY", "QQQ", "TLT"];
+    const sample = charts[0].intervals;
+    const old = fakeCharts(new Date(+now - 2 * 86400_000))[0].intervals["15Min"];
+    const intra = fault === "empty" ? [] : ["closed", "stale"].includes(fault) ? old : sample["15Min"];
+    const mcp: Mcp = { async call(tool, args) {
+      expect(tool).toBe("get_stock_bars");
+      const { timeframe, feed } = args as { timeframe: string; feed: string };
+      expect(feed).toBe("iex");
+      return fault === timeframe ? { isError: true } : { structuredContent: { bars:
+        Object.fromEntries(symbols.map(symbol => [symbol, timeframe === "15Min" ? intra : sample["1Day"]])) } };
+    } };
+    const market = new Market(mcp, false);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(null, { status: 503 })) as typeof fetch;
+    let actual;
+    try { actual = await market.charts(now); } finally { globalThis.fetch = originalFetch; }
+    const f = await fixture();
+    if (fault === "closed") await f.state.write("fake-open.json", false);
+    f.market.charts = async () => actual;
+    await f.start();
+    const report = (await f.state.baton()).baton!.report;
+    const orders = await f.broker.orders();
+    console.log("AUDIT", JSON.stringify({ iex: fault, orders: orders.length, wake: opening.id,
+      sample: actual.find(series => series.symbol === "SPY")?.intervals["1Day"]?.length }));
+    for (const symbol of symbols) {
+      const series = actual.find(row => row.symbol === symbol)!;
+      expect(series.intervals["1Day"]).toEqual(fault === "1Day" ? [] : sample["1Day"]);
+      expect(series.intervals["15Min"]).toEqual(fault === "15Min" ? [] : intra);
+      const line = report.split("\n").find(row => row.startsWith(symbol + " (Alpaca IEX)")) ?? "";
+      const intraStamp = fault === "15Min" ? undefined : intra.at(-1)?.t;
+      const dailyStamp = fault === "1Day" ? undefined : sample["1Day"].at(-1)?.t;
+      expect(line).toContain("15Min");
+      expect(line).toContain("1Day");
+      for (const stamp of [intraStamp, dailyStamp]) if (stamp) expect(line).toContain(stamp);
+      expect(line).toContain(({ empty: "serie assente", stale: "dato datato", closed: "mercato chiuso" } as Record<string, string>)[fault] ?? "errore del feed");
+    }
+    expect(orders).toHaveLength(fault === "1Day" ? 1 : 0);
+  });
+}
+
+for (const field of ["events", "newMarkets"] as const) {
+  test(`Audit news limite risposta ${field}`, async () => {
+    const { ask } = await import("../src/agents");
+    const event = { title: "Dato", source: "Fonte", link: "https://example.org", published: now.toISOString(),
+      symbols: ["SPY"], impact: "Impatto.", classification: "fatto" };
+    const market = { name: "SPY", symbol: "SPY", event: "Dato", link: event.link, source: event.source,
+      published: event.published, reason: "Motivo." };
+    const limit = field === "events" ? 6 : 2;
+    const values = Array(limit).fill(field === "events" ? event : market);
+    const reply = { events: [], newMarkets: [], limitations: [], [field]: values };
+    const agents = { invoke: async () => reply };
+    expect(await ask(agents, "news", {})).toEqual(reply);
+    values.push(values[0]);
+    await expect(ask(agents, "news", {})).rejects.toThrow("Risposta non valida");
+  });
+}

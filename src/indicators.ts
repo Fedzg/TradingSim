@@ -48,7 +48,7 @@ function intervalEvidence(series: Series, interval: Interval, now: Date) {
   const volume = relativeVolume(bars);
   const lagMinutes = last ? Math.round((+now - Date.parse(last.t) - duration[interval]) / 60_000) : null;
   return {
-    lastClosed: last?.t ?? null, lagMinutes,
+    lastClosed: last?.t ?? null, lagMinutes, feedError: series.intervalErrors?.[interval],
     stale: lagMinutes === null || lagMinutes > (interval === "15Min" ? 75 : 4 * 24 * 60),
     count: bars.length, changePct: bars.length > 1 ? rounded(pct(bars.at(-2)!.c, last!.c)) : null,
     sma5: mean(5), sma20: mean(20), rsi14: rsi === null ? null : rounded(rsi),

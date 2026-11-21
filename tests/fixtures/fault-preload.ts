@@ -99,3 +99,60 @@ if (mode === "charts") {
     return charts;
   };
 }
+
+if (mode === "audit" && process.argv.includes("_run")) {
+  const { appendFile } = await import("node:fs/promises");
+  const trace = (event: string) => appendFile(join(root, "audit.trace"), event + "\n");
+  const fault = process.env.AUDIT_FAULT;
+  let placed = false;
+  const call = FakeMcp.prototype.call;
+  FakeMcp.prototype.call = async function(name, args) {
+    await trace(name + (args?.client_order_id ? " " + args.client_order_id : ""));
+    if (name === "get_account_info" && fault === "account-error") return { isError: true };
+    if ((name === "get_account_info" && fault === "account-invalid") ||
+        (name === "get_all_positions" && fault === "positions") ||
+        (name === "get_orders" && args?.status === fault) ||
+        (name === "get_clock" && fault === "clock")) return { structuredContent: {} };
+    if ((name === "get_all_positions" && fault === "position-row") || (name === "get_orders" && args?.status === "open" && fault === "order-row")) {
+      return { structuredContent: { result: [null] } };
+    }
+    if (name === "get_order_by_client_id" && fault === "lookup-ambiguous") {
+      return { isError: true, content: [{ type: "text", text: "HTTP error 500: upstream previously returned 404: Not Found" }] };
+    }
+    if (name === "get_order_by_client_id" && (fault === "lookup-500" || (placed && fault === "lost"))) {
+      return { isError: true, content: [{ type: "text", text: "HTTP error 500: Internal Server Error" }] };
+    }
+    if (name === "place_stock_order" && fault === "buying-power") {
+      return { structuredContent: { _alpaca_mcp_security: {}, data: { error: {
+        message: "API rejected the order", http_status: 403,
+        detail: { code: 40310000, message: "insufficient buying power" },
+      } } } };
+    }
+    const result = await call.call(this, name, args);
+    if (name === "place_stock_order" && fault === "lost") {
+      placed = true;
+      return { isError: true };
+    }
+    if (name === "place_stock_order" && fault === "rejected") {
+      const orders = await this.orders();
+      orders.at(-1)!.status = "rejected";
+      await Bun.write(join(root, "fake-broker.json"), JSON.stringify(orders));
+      // The submission response is lost. A lookup returns the definitive broker rejection.
+      return { isError: true };
+    }
+    return result;
+  };
+  const invoke = FakeAgents.prototype.invoke;
+  FakeAgents.prototype.invoke = async function(role, input) {
+    await trace(role);
+    if (role === "news" && fault?.startsWith("news-")) {
+      const timer = globalThis.setTimeout;
+      globalThis.setTimeout = ((fn, ms, ...args) => timer(fn, ms === 150000 ? 75 : ms, ...args)) as typeof setTimeout;
+      try { return await new CodexAgents(x => x).invoke(role, input); }
+      finally { globalThis.setTimeout = timer; }
+    }
+    if (role === "review" && fault === "review-down") throw new Error("Revisore indisponibile");
+    if (role === "review" && fault === "review-schema") return { verdict: true };
+    return invoke.call(this, role, input);
+  } as typeof invoke;
+}
