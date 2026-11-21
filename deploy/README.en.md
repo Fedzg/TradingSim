@@ -60,20 +60,32 @@ TELEGRAM_CHAT_ID=your-chat-id
 
 Run `docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker telegram-check`
 only when you want to send a test notification. After changing the file,
-recreate the worker. The outbox retains unsent reports and checkpoints
-multipart delivery.
+recreate the worker. Telegram automatically sends only confirmed order
+updates and saved watchlist additions. Other messages stay in the local
+outbox, including older queued reports. The worker checks order state
+between trading sessions approximately once a minute.
+`chart-report` displays and saves its report locally. If Telegram accepts a
+message and its acknowledgment is lost, a retry can repeat the message.
 
-## Automatic watchlist
+## Watchlist permission and review
 
-Discovery runs at most every 15 minutes regardless of whether Telegram is
-configured. It compares completed 15-minute candles with recent daily
-volatility. A candidate needs a daily move of at least 1.5 times the median
-and a consistent 60-minute move of at least 20% of that median. The worker
-reports relative volume where available and flags missing or stale data.
-After both analysts agree, the instrument is saved once for monitoring only.
-An optional Telegram confirmation contains no approval controls.
+The scanner runs at most every 15 minutes. Two analysts can propose an
+instrument from recent market data. View pending proposals and grant
+permission from the worker terminal. Replace `PROPOSAL_ID` with the ID you
+want reviewed.
 
-Use `discovery-scan` to probe the sources without changing the watchlist or
-sending a message, and `discovery-status` to inspect the last saved coverage.
-For platform-specific commands see the [Windows guide](windows.md). Inspect
-account output and logs locally before sharing them.
+```sh
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts watchlist-pending
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts watchlist-approve PROPOSAL_ID
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts discovery-status
+```
+
+Permission opens the independent review. The reviewer checks recent
+evidence against Stooq or Coinbase Exchange data and asks both analysts to
+address the objections. Missing evidence or a veto prevents the addition.
+Saved instruments are for monitoring only. The set of eligible Paper orders
+is unchanged.
+
+Use `discovery-scan` to probe data sources without notifying Telegram or
+changing the watchlist. Use `discovery-status` for coverage and the results
+of completed reviews.

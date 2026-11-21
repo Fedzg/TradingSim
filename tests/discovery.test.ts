@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Agents, Role } from "../src/agents";
 import { FakeBroker, universe } from "../src/broker";
-import { flush, type Message } from "../src/chat";
+import { enqueue, type Message } from "../src/chat";
 import { Discovery, savedWatchlist } from "../src/discovery";
 import { catalog, scan, trend, type Candidate } from "../src/discovery-sources";
+import { flushNotifications } from "../src/notifications";
 import type { Series } from "../src/market";
 import { risk } from "../src/risk";
 import { State } from "../src/state";
@@ -32,7 +33,7 @@ const candidate: Candidate = { instrument: catalog[0], metrics, market: {
   url: "https://example.com/mercato", source: "Fonte primaria", at: metrics.at, detail: "Movimento 3× la volatilità tipica.",
 } };
 
-async function fixture(options: { veto?: Role; fail?: Role; invalidSource?: Role } = {}) {
+async function fixture(options: { veto?: Role; fail?: Role; invalidSource?: Role; missingIndependent?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "tradingsim-discovery-"));
   roots.push(root);
   const state = new State(root);
@@ -40,10 +41,13 @@ async function fixture(options: { veto?: Role; fail?: Role; invalidSource?: Role
   const agents: Agents = { async invoke(role) {
     calls.push(role);
     if (role === options.fail) throw new Error("Interruzione simulata");
-    return { verdict: role === options.veto ? "reject" : "approve", reason: "Motivo verificabile.", doubt: "Volume ridotto.",
-      sourceIds: [role === options.invalidSource ? "inesistente" : "mercato"] };
+    if (role === "discoveryChallenge") return { newsQuestion: "Quali notizie?", chartsQuestion: "Quali dati?", objection: "Movimento momentaneo?" };
+    return { verdict: role === options.veto ? "reject" : "approve", reason: "Conferma del movimento su due fonti.", doubt: "Volume ridotto.",
+      sourceIds: [role === options.invalidSource ? "inesistente" : role === "discoveryReview" ? "indipendente" :
+        role === "discoveryChartsAnswer" ? "aggiornato" : "mercato"] };
   } };
-  const engine = () => new Discovery(new State(root), agents, x => x);
+  const engine = () => new Discovery(new State(root), agents, x => x, async () => series("AMD"),
+    async () => options.missingIndependent ? undefined : { url: "https://example.com/seconda", source: "Seconda fonte", at: now.toISOString(), detail: "Prezzo coerente." });
   const collect = (job = engine()) => job.collect({ candidates: [candidate], coverage: [] }, [], now);
   const messages = async () => (await Promise.all((await state.list("outbox")).map(x => state.read<Message>(`outbox/${x}`)))).filter(x => !!x);
   return { state, engine, calls, collect, messages };
@@ -78,17 +82,33 @@ test("un veto, un errore o una fonte invalida impediscono l’aggiunta", async (
   }
 });
 
-test("due conferme aggiungono direttamente un solo strumento, senza ordini", async () => {
+test("due conferme preparano una proposta locale e l’aggiunta richiede permesso e revisore", async () => {
   const f = await fixture();
   await f.collect();
-  await f.collect();
+  const proposal = (await f.engine().proposals())[0];
+  expect(proposal.status).toBe("pending");
+  await f.engine().reviewApproved(now);
   await f.engine().publish();
   expect(f.calls).toEqual(["discoveryNews", "discoveryCharts"]);
+  expect(await f.messages()).toEqual([]);
+  expect(await savedWatchlist(f.state)).toEqual([]);
+
+  await f.engine().approve(proposal.id);
+  await expect(f.engine().approve(proposal.id)).rejects.toThrow("già decisa");
+  await f.engine().publish();
+  expect(await f.messages()).toEqual([]);
+  await f.engine().reviewApproved(now);
   expect((await savedWatchlist(f.state)).map(x => x.symbol)).toEqual(["AMD"]);
+  expect(await f.messages()).toEqual([]); // Interruzione simulata tra salvataggio e coda.
+
+  // Un nuovo processo logico riapre lo stato, ricrea una sola notifica.
+  await f.engine().reviewApproved(now);
+  await f.engine().publish();
+  await f.engine().publish();
+  expect(f.calls.slice(2)).toEqual(["discoveryChallenge", "discoveryNewsAnswer", "discoveryChartsAnswer", "discoveryReview"]);
   const messages = (await f.messages()).filter(x => x.text.includes("Aggiunto alla watchlist"));
   expect(messages).toHaveLength(1);
-  expect(messages[0].text).toContain(candidate.market.url);
-  expect(messages[0]).not.toHaveProperty("buttons");
+  expect(messages[0].text).toContain("Motivo finale: Conferma del movimento su due fonti.");
 
   const broker = new FakeBroker(f.state);
   const snapshot = await broker.snapshot();
@@ -97,34 +117,40 @@ test("due conferme aggiungono direttamente un solo strumento, senza ordini", asy
   expect(await broker.orders()).toEqual([]);
 });
 
-test("riavvio dopo il salvataggio ricrea l’avviso senza rieseguire gli analisti", async () => {
-  const f = await fixture();
-  const job = f.engine();
-  job.publish = async () => { throw new Error("Interruzione prima della coda"); };
-  await expect(f.collect(job)).rejects.toThrow("Interruzione prima della coda");
-  expect(await savedWatchlist(f.state)).toHaveLength(1);
-  expect(await f.messages()).toEqual([]);
-  await f.engine().publish();
-  await f.engine().publish();
-  expect((await f.messages()).filter(x => x.text.includes("Aggiunto alla watchlist"))).toHaveLength(1);
-  expect(f.calls).toEqual(["discoveryNews", "discoveryCharts"]);
+test("un veto indipendente o una fonte mancante non aggiungono e non inviano", async () => {
+  for (const options of [{ veto: "discoveryReview" }, { missingIndependent: true }] as const) {
+    const f = await fixture(options);
+    await f.collect();
+    await f.engine().approve((await f.engine().proposals())[0].id);
+    await f.engine().reviewApproved(now);
+    await f.engine().publish();
+    expect((await f.engine().proposals())[0].status).toBe("rejected");
+    expect(await savedWatchlist(f.state)).toEqual([]);
+    expect(await f.messages()).toEqual([]);
+  }
 });
 
-test("Telegram invia soltanto la conferma e scarta le vecchie richieste non consegnate", async () => {
+test("Telegram consegna una sola aggiunta salvata e conserva la copertura e i vecchi riepiloghi locali", async () => {
   const f = await fixture();
-  await f.state.write("outbox/000-legacy.json", {
-    id: "000-legacy", kind: "watchlist", text: "Autorizza revisione", buttons: [{ text: "Scarta", callback_data: "wl:no:legacy" }],
-  });
+  await enqueue(f.state, "test", "watchlist", "Vecchio riepilogo di copertura");
+  await enqueue(f.state, "test", "resoconto", "Briefing");
   await f.collect();
-  const sent: Array<{ url: string; payload: Record<string, unknown> }> = [];
-  const channel = new TelegramChannel("0:fake", "42", (async (url: string, init: RequestInit) => {
-    sent.push({ url, payload: JSON.parse(String(init.body)) });
+  const sent: string[] = [];
+  const channel = () => new TelegramChannel("0:fake", "42", (async (url: string, init: RequestInit) => {
+    expect(url).toEndWith("/sendMessage");
+    sent.push(JSON.parse(String(init.body)).text);
     return Response.json({ ok: true });
   }) as typeof fetch);
-  await flush(f.state, channel);
-  const notices = sent.filter(x => String(x.payload.text).includes("Aggiunto alla watchlist"));
-  expect(notices).toHaveLength(1);
-  expect(sent.every(x => x.url.endsWith("/sendMessage") && !x.payload.reply_markup)).toBe(true);
-  expect(sent.some(x => String(x.payload.text).includes("Autorizza revisione"))).toBe(false);
-  expect(await f.state.read("outbox/000-legacy.json")).toBeUndefined();
+  await flushNotifications(f.state, channel(), x => x);
+  expect(sent).toEqual([]);
+  await f.engine().approve((await f.engine().proposals())[0].id);
+  await f.engine().reviewApproved(now);
+  await f.engine().publish();
+  await flushNotifications(f.state, channel(), x => x);
+  await f.engine().publish();
+  await flushNotifications(new State(f.state.root), channel(), x => x);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toContain("Aggiunto alla watchlist");
+  expect(sent[0]).toContain("Motivo finale");
+  expect((await f.messages()).filter(message => !message.delivered)).toHaveLength(2);
 });

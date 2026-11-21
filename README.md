@@ -14,9 +14,9 @@ Telegram notifications. It does not connect to a live trading account.
   without automatically submitting them again. A broker acceptance is distinct
   from a fill.
 - Market discovery scans a fixed set of stocks, FX, futures, crypto, and CFD
-  underlyings. Two analysts must agree before an instrument is added to the
-  persistent watchlist. Additions are **monitoring only**. Telegram sends an
-  informational confirmation and does not ask for approval.
+  underlyings. Two analysts can propose an instrument. The operator grants permission on
+  demand, then an independent reviewer makes the final decision. Additions
+  are **monitoring only**.
 
 ## Quick start
 
@@ -43,11 +43,12 @@ monitored via its underlying index only. The worker reports unavailable or
 insufficient discovery feeds. A functioning feed depends on the deployment
 network and provider access.
 
-Reports, order status updates, news, and watchlist additions are written to
-a persistent outbox. Telegram delivery is optional. Large messages are sent in
-parts. If Telegram accepts a part and the acknowledgment is lost, that part can
-be repeated. Review the local outbox and broker state before sharing logs,
-which may include Paper account data.
+Telegram automatically sends only confirmed Paper order updates and saved
+watchlist additions. Reports, charts, and news remain in local state, even
+when they were previously queued. If Telegram accepts a message and its
+acknowledgment is lost, delivery can still be repeated. See the
+[watchlist commands](deploy/README.en.md#watchlist-permission-and-review) to
+inspect proposals and grant permission. Logs may include Paper account data.
 
 ## Checks without orders
 

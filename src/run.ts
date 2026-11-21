@@ -2,6 +2,7 @@ import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAna
 import { FakeBroker, type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
 import { chartScenarios } from "./chart-scenarios";
 import { enqueue } from "./chat";
+import { queueOrder } from "./notifications";
 import { miniChart, type Market, type News, type Series } from "./market";
 import { limitFor, risk, stops, terminal, ticketFor, trading } from "./risk";
 import { type Baton, type RunLock, State } from "./state";
@@ -36,9 +37,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
   const confirmed = new Map<string, BrokerOrder>();
   const errorText = (error: unknown) => redact(error instanceof Error ? error.message : "Errore inatteso.");
   const note = (message: string) => lines.push(redact(message));
-  const notifyOrder = (order: BrokerOrder) => enqueue(state, entry.id, "ordine",
-    redact(`${order.symbol} ${order.side === "buy" ? "acquisto" : "vendita"} × ${order.qty}\n${observed(order, brokerLabel)}`),
-    JSON.stringify([order.client_order_id, order.status, Number(order.filled_qty)]));
+  const notifyOrder = (order: BrokerOrder, intent: Intent) => queueOrder(state, order, intent, brokerLabel, redact);
   if (warning) alerts.push(warning);
   if (interrupted) alerts.push(`Sveglia ${interrupted.wake.id} interrotta. Verifica degli intenti registrati con Alpaca.`);
   if (previous) {
@@ -57,7 +56,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
       const order = await broker.find(intent.id);
       if (order) {
         if (order.status !== intent.observed?.status || Number(order.filled_qty) !== Number(intent.observed?.filled_qty)) {
-          await notifyOrder(order);
+          await notifyOrder(order, intent);
         }
         await state.write(`intents/${intent.id}.json`, { ...intent, observed: order });
         confirmed.set(intent.id, order);
@@ -126,7 +125,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     try {
       const result = await broker.submit(intent);
       if (result.client_order_id !== id) throw new Error("ID inatteso nella risposta di Alpaca.");
-      await notifyOrder(result);
+      await notifyOrder(result, intent);
       await state.write(`intents/${id}.json`, { ...intent, observed: result });
       confirmed.set(id, result);
       note(observed(result, brokerLabel));
@@ -232,7 +231,8 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
       const status = observed(order, brokerLabel);
       if (!lines.includes(status)) {
         note(status);
-        await notifyOrder(order);
+        const intent = intents.find(item => item.id === order.client_order_id);
+        if (intent) await notifyOrder(order, intent);
       }
       if (terminal.has(order.status)) pending.delete(order.client_order_id);
     }

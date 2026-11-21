@@ -5,9 +5,10 @@ import { ask, CodexAgents, FakeAgents, type Charts } from "./agents";
 import { Discovery, savedWatchlist } from "./discovery";
 import { readSeries, scan } from "./discovery-sources";
 import { chartScenarios } from "./chart-scenarios";
-import { enqueue, FakeChannel, flush, UnavailableChat, type Message } from "./chat";
+import { enqueue, FakeChannel, UnavailableChat, type Message } from "./chat";
 import { AlpacaStdio } from "./mcp";
 import { Market } from "./market";
+import { flushNotifications, notificationSelector, pollOrders } from "./notifications";
 import { queueNewsSignals } from "./news-signals";
 import { run } from "./run";
 import { State } from "./state";
@@ -61,11 +62,14 @@ async function status() {
   const guard = Bun.spawn(["flock", "--no-fork", "-n", "-E", "75", state.path("run.guard"), "true"]);
   const status = await guard.exited;
   const queue = await Promise.all((await state.list("outbox")).map(file => state.read<Message>(`outbox/${file}`)));
+  const select = await notificationSelector(state, opts.redact);
+  const pending = queue.filter((item): item is Message => !!item && !item.delivered);
+  const eligible = (await Promise.all(pending.map(select))).filter(item => !!item);
   const local = {
     modalità: fake ? "finta" : "Alpaca Paper", guard: status === 0 ? "libero" : status === 75 ? "occupato" : "non verificato",
     lock: await state.read("run.lock") ?? null, ...await state.baton(), notizie: await market.cachedNews(state),
-    consegna: { totale: queue.length, in_coda: queue.filter(x => x && !x.delivered).length,
-      ultimo_errore: queue.filter(x => x?.error).at(-1)?.error ?? null },
+    consegna: { totale: queue.length, in_coda: eligible.length, solo_locale: pending.length - eligible.length,
+      ultimo_errore: eligible.filter(x => x.error).at(-1)?.error ?? null },
     prossima_sveglia: nextWake(new Date()),
   };
   console.log(opts.redact(JSON.stringify(local, null, 2)));
@@ -97,6 +101,8 @@ async function schedule() {
   let lastLaunch = "";
   let active: ReturnType<typeof child> | undefined;
   let discovering = false;
+  let polling = false;
+  let lastOrders = 0;
   const jobs = new Set<ReturnType<typeof child>>();
   let stopping = false;
   function background(lock: string, command: string) {
@@ -105,7 +111,8 @@ async function schedule() {
     void proc.exited.then(() => {
       jobs.delete(proc);
       if (command === "_discover") discovering = false;
-      if ((command === "_news" || command === "_discover") && !stopping) background("outbox.guard", "_flush");
+      if (command === "_orders") polling = false;
+      if ((command === "_orders" || command === "_discover") && !stopping) background("outbox.guard", "_flush");
     });
   }
   let wakeUp: (() => void) | undefined;
@@ -140,6 +147,11 @@ async function schedule() {
       if (!fake && !discovering) {
         discovering = true;
         background("discovery.guard", "_discover");
+      }
+      if ((telegram || fake) && !polling && +now - lastOrders >= 60_000) {
+        lastOrders = +now;
+        polling = true;
+        background("orders.guard", "_orders");
       }
       if (+now - lastChecked >= interval) {
         lastChecked = +now;
@@ -176,7 +188,6 @@ try {
       console.log("Messaggio di prova Telegram inviato.");
       break;
     case "chart-report": {
-      if (!fake && !telegram) throw new Error("Configura Telegram per il resoconto dei grafici.");
       const now = new Date();
       const charts = await (await marketWithWatchlist()).charts(now);
       const analysis = await ask<Charts>(fake ? new FakeAgents() : new CodexAgents(opts.redact), "charts", { now, charts });
@@ -184,7 +195,7 @@ try {
         ?? "Nessuno scenario direzionale con dati sufficienti nell’ultimo controllo.";
       const { date, time } = rome(now);
       await enqueue(state, `${date}-${time.replace(":", "")}-grafici`, "scenario-grafici", opts.redact(scenarios));
-      process.exitCode = exitStatus(await child("outbox.guard", "_flush", mode).exited);
+      console.log(opts.redact(scenarios));
       break;
     }
     case "deliver": process.exitCode = exitStatus(await child("outbox.guard", "_flush", mode).exited); break;
@@ -200,7 +211,7 @@ try {
           opts.redact(`⚠ ${news.error} Ultimo aggiornamento: ${news.lastSuccess ?? "assente"}.`));
       }
       console.log(`Monitor notizie: ${news.error ?? `${news.articles.length} articoli in cache`}; ultimo aggiornamento ${news.lastSuccess ?? "assente"}.`);
-      if (telegram && !news.error) {
+      if (!fake && !news.error) {
         try {
           const queued = await queueNewsSignals(state, new CodexAgents(opts.redact), news, now, opts.redact);
           console.log(`Notizie con possibile impatto Paper: ${queued} avvisi in coda.`);
@@ -213,7 +224,9 @@ try {
     case "discovery-status": {
       const engine = new Discovery(state, new CodexAgents(opts.redact), opts.redact);
       const { scanAt, coverage } = await engine.status();
-      console.log(JSON.stringify({ scanAt, coverage, watchlist: await savedWatchlist(state) }, null, 2));
+      const revisioni = (await engine.proposals()).filter(item => item.status !== "pending")
+        .map(item => ({ id: item.id, simbolo: item.candidate.instrument.symbol, stato: item.status, motivo: item.reason }));
+      console.log(opts.redact(JSON.stringify({ scanAt, coverage, watchlist: await savedWatchlist(state), revisioni }, null, 2)));
       break;
     }
     case "discovery-scan": {
@@ -221,26 +234,48 @@ try {
       console.log(JSON.stringify(await scan(new Date()), null, 2));
       break;
     }
+    case "watchlist-pending": {
+      const engine = new Discovery(state, new CodexAgents(opts.redact), opts.redact);
+      console.log(opts.redact(JSON.stringify((await engine.proposals()).filter(item => item.status === "pending"), null, 2)));
+      break;
+    }
+    case "watchlist-approve": {
+      const id = flags.find(flag => /^[a-f0-9]{24}$/.test(flag));
+      if (!id) throw new Error("Uso: watchlist-approve ID, dopo aver consultato watchlist-pending.");
+      const code = await child("discovery.guard", "_watchlist-approve", [id, ...mode]).exited;
+      if (code === 75) throw new Error("Scoperta in corso. Riprova tra poco.");
+      process.exitCode = code;
+      break;
+    }
+    case "_watchlist-approve": {
+      const id = flags[0];
+      if (!/^[a-f0-9]{24}$/.test(id ?? "")) throw new Error("ID proposta non valido.");
+      await new Discovery(state, new CodexAgents(opts.redact), opts.redact).approve(id);
+      console.log("Permesso salvato. Il worker sottoporrà la proposta alla revisione indipendente.");
+      break;
+    }
     case "_discover": {
       if (fake) break;
       const engine = new Discovery(state, new CodexAgents(opts.redact), opts.redact);
       const { scanAt } = await engine.status();
       const now = new Date();
-      if (!scanAt || +now - Date.parse(scanAt) >= 15 * 60_000) {
-        await engine.collect(await scan(now), (await market.cachedNews(state)).articles, now);
-      } else {
-        await engine.publish();
-      }
+      try {
+        await engine.reviewApproved(now);
+        if (!scanAt || +now - Date.parse(scanAt) >= 15 * 60_000) {
+          await engine.collect(await scan(now), (await market.cachedNews(state)).articles, now);
+        }
+      } finally { await engine.publish(); }
       break;
     }
-    case "_flush": await flush(state, channel); break;
+    case "_orders": await pollOrders(state, paper(), opts.redact); break;
+    case "_flush": await flushNotifications(state, channel, opts.redact); break;
     case "_run": {
       if (!scheduledDate || !slots.includes(rawSlot as Slot)) throw new Error("Sveglia interna non valida.");
       await run({ state, broker: paper(), agents: fake ? new FakeAgents() : new CodexAgents(opts.redact), market: await marketWithWatchlist(), redact: opts.redact },
         wake(scheduledDate, rawSlot as Slot), force);
       break;
     }
-    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check, telegram-check, chart-report, discovery-status, discovery-scan.");
+    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check, telegram-check, chart-report, discovery-status, discovery-scan, watchlist-pending, watchlist-approve.");
   }
 } catch (error) {
   console.error(opts.redact(String(error)));

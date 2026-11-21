@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Wake } from "./time";
 import { slots, wake } from "./time";
@@ -19,7 +19,7 @@ export class State {
     }
   }
 
-  async write(name: string, value: unknown) {
+  async write(name: string, value: unknown, once = false) {
     const path = this.path(name);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temp = path + "." + crypto.randomUUID() + ".tmp";
@@ -29,7 +29,10 @@ export class State {
         await file.writeFile(JSON.stringify(value, null, 2) + "\n");
         await file.sync();
       } finally { await file.close(); }
-      await rename(temp, path);
+      if (once) {
+        try { await link(temp, path); }
+        catch (error) { if (error.code === "EEXIST") return; throw error; }
+      } else await rename(temp, path);
       const directory = await open(dirname(path), "r");
       try { await directory.sync(); } finally { await directory.close(); }
     } finally {

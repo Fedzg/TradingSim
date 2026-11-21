@@ -1,14 +1,20 @@
 import { createHash } from "node:crypto";
 import { ask, type Agents, type Role } from "./agents";
 import { enqueue } from "./chat";
-import type { scan, Candidate, Evidence, Instrument } from "./discovery-sources";
+import { readSeries, trend, type scan, type Candidate, type Evidence, type Instrument } from "./discovery-sources";
 import type { Article } from "./market";
 import type { State } from "./state";
-import { rome } from "./time";
+import { reviewEvidence } from "./discovery-review-source";
 
 type Finding = { verdict: "approve" | "reject"; reason: string; doubt: string; sourceIds: string[] };
 type Sources = Record<string, Evidence>;
+type Challenge = { newsQuestion: string; chartsQuestion: string; objection: string };
+type Proposal = {
+  candidate: Candidate; sources: Sources; news: Finding; charts: Finding; status: "pending" | "approved" | "rejected" | "added";
+  challenge?: Challenge; newsAnswer?: Finding; chartsAnswer?: Finding; reason?: string; checkedAt?: string; failures?: number;
+};
 type Registry = {
+  proposals?: Record<string, Proposal>;
   scanAt?: string; coverage?: Awaited<ReturnType<typeof scan>>["coverage"];
   watchlist: Record<string, { instrument: Instrument; addedAt: string; notice?: string }>;
 };
@@ -17,8 +23,6 @@ const path = "watchlist.json";
 const registry = async (state: State): Promise<Registry> => await state.read<Registry>(path) ?? { watchlist: {} };
 const requestId = (item: Instrument) => createHash("sha256").update(JSON.stringify([item.category, item.venue, item.symbol])).digest("hex").slice(0, 24);
 const trim = (text: string) => text.slice(0, 430);
-const sourceLine = (source: Evidence) => `${source.source} · ${source.at} · ${source.url}`;
-const evidenceLinks = (sources: Sources, ids: string[]) => [...new Set(ids)].filter(id => Object.hasOwn(sources, id)).map(id => sourceLine(sources[id])).join("\n");
 
 export async function savedWatchlist(state: State) {
   return Object.values((await registry(state)).watchlist).map(entry => entry.instrument);
@@ -47,13 +51,17 @@ async function find(agents: Agents, role: Role, input: object, sources: Sources,
 }
 
 export class Discovery {
-  constructor(private state: State, private agents: Agents, private redact: (text: string) => string) {}
+  constructor(private state: State, private agents: Agents, private redact: (text: string) => string, private refresh = readSeries, private compare = reviewEvidence) {}
 
   // Il chiamante serializza le scansioni con discovery.guard.
   async collect(result: Awaited<ReturnType<typeof scan>>, articles: Article[], now: Date) {
     const data = await registry(this.state);
     data.coverage = result.coverage;
-    const ranked = result.candidates.filter(c => !data.watchlist[requestId(c.instrument)])
+    const proposals = data.proposals ??= {};
+    const ranked = result.candidates.filter(c => {
+      const id = requestId(c.instrument);
+      return !data.watchlist[id] && (!proposals[id] || proposals[id].status === "pending");
+    })
       .sort((a, b) => b.metrics.relativeMove - a.metrics.relativeMove);
     const scanned = new Set<Instrument["category"]>();
     for (const candidate of ranked) {
@@ -72,33 +80,101 @@ export class Discovery {
         continue;
       }
       if (news.value.verdict !== "approve" || charts.value.verdict !== "approve") continue;
-      const { instrument, market } = candidate;
-      const notice = [
-        `${instrument.symbol} · ${instrument.category} · ${instrument.venue}`, instrument.series,
-        "Aggiunto alla watchlist. Solo monitoraggio.", market.detail, `Dato: ${market.at}`,
-        `Analista notizie: ${trim(news.value.reason)}`, `Analista grafici: ${trim(charts.value.reason)}`,
-        `Dubbio: ${trim(charts.value.doubt)} / ${trim(news.value.doubt)}`,
-        evidenceLinks(sources, ["mercato", ...news.value.sourceIds, ...charts.value.sourceIds]), instrument.providerUrl,
-      ].filter(Boolean).join("\n");
-      data.watchlist[id] = { instrument, addedAt: now.toISOString(), notice: this.redact(notice) };
-      await this.state.write(path, data);
+      proposals[id] = { candidate, sources, news: news.value, charts: charts.value, status: "pending" };
     }
     data.scanAt = now.toISOString();
     await this.state.write(path, data);
-    await this.publish();
+  }
+
+  async proposals() {
+    const data = await registry(this.state);
+    return Object.entries(data.proposals ?? {}).filter(([, item]) => item.status !== "added")
+      .map(([id, item]) => ({ id, ...item }));
+  }
+
+  // Questo comando è eseguito sotto discovery.guard dall’operatore del worker.
+  async approve(id: string) {
+    const data = await registry(this.state);
+    const proposal = data.proposals && Object.hasOwn(data.proposals, id) ? data.proposals[id] : undefined;
+    if (!proposal || proposal.status !== "pending") throw new Error("Proposta inesistente o già decisa.");
+    proposal.status = "approved";
+    await this.state.write(path, data);
+  }
+
+  async reviewApproved(now: Date) {
+    const data = await registry(this.state);
+    const entry = Object.entries(data.proposals ?? {}).find(([, item]) => item.status === "approved");
+    if (!entry) return;
+    const [id, proposal] = entry;
+    try { await this.review(id, proposal, data, now); }
+    catch (error) {
+      if (proposal.status !== "approved") throw error;
+      proposal.failures = (proposal.failures ?? 0) + 1;
+      if (proposal.failures >= 3) {
+        proposal.status = "rejected";
+        proposal.reason = "Revisione indisponibile dopo tre tentativi.";
+      }
+      await this.state.write(path, data);
+      if (proposal.status === "approved") throw error;
+    }
+  }
+
+  private async review(id: string, proposal: Proposal, data: Registry, now: Date) {
+    const save = () => this.state.write(path, data);
+    const reject = async (reason: string) => {
+      proposal.status = "rejected";
+      proposal.reason = this.redact(reason);
+      await save();
+    };
+    const { candidate, sources } = proposal;
+    if (proposal.checkedAt && +now - Date.parse(proposal.checkedAt) > 90 * 60_000) {
+      return reject("Le prove aggiornate sono scadute durante la revisione.");
+    }
+    if (!proposal.challenge) {
+      const [fresh, independent] = await Promise.all([
+        this.refresh(candidate.instrument).then(series => trend(series, now).metrics).catch(() => undefined),
+        this.compare(candidate.instrument, now),
+      ]);
+      if (!fresh || !independent || Math.sign(fresh.dayPct) !== Math.sign(candidate.metrics.dayPct)) {
+        return reject("Segnale aggiornato o confronto indipendente insufficienti.");
+      }
+      sources.aggiornato = { ...candidate.market, at: fresh.at,
+        detail: `Giorno ${fresh.dayPct.toFixed(2)}%, ora ${fresh.hourPct.toFixed(2)}%, volume relativo ${fresh.volumeMultiple ?? "non disponibile"}, invalidazione ${fresh.invalidation}.` };
+      sources.indipendente = independent;
+      proposal.challenge = await ask<Challenge>(this.agents, "discoveryChallenge", { candidate, sources, initial: [proposal.news, proposal.charts] });
+      proposal.checkedAt = fresh.at;
+      await save();
+    }
+    const context = { candidate, challenge: proposal.challenge, initial: [proposal.news, proposal.charts] };
+    if (!proposal.newsAnswer) {
+      proposal.newsAnswer = await find(this.agents, "discoveryNewsAnswer", context, sources);
+      await save();
+    }
+    if (!proposal.chartsAnswer) {
+      proposal.chartsAnswer = await find(this.agents, "discoveryChartsAnswer", context, sources, "aggiornato");
+      await save();
+    }
+    const veto = [proposal.newsAnswer, proposal.chartsAnswer].find(answer => answer.verdict === "reject");
+    if (veto) return reject(veto.reason);
+    const result = await find(this.agents, "discoveryReview", {
+      ...context, answers: [proposal.newsAnswer, proposal.chartsAnswer],
+    }, sources, "indipendente");
+    if (result.verdict === "reject") return reject(result.reason);
+    proposal.status = "added";
+    proposal.reason = this.redact(trim(result.reason));
+    const notice = this.redact([
+      `${candidate.instrument.symbol} · ${candidate.instrument.category}`,
+      "Aggiunto alla watchlist. Solo monitoraggio.",
+      `Motivo finale: ${trim(result.reason)}`,
+    ].join("\n"));
+    data.watchlist[id] = { instrument: candidate.instrument, addedAt: now.toISOString(), notice };
+    await save();
   }
 
   async publish() {
     const data = await registry(this.state);
-    if (data.scanAt && data.coverage) {
-      const { date } = rome(new Date(data.scanAt));
-      const text = ["Copertura delle fonti per la scoperta dei mercati",
-        ...data.coverage.map(item => `${item.category}: ${item.usable}/${item.total} strumenti con dati utilizzabili${item.notes.length ? ". " + item.notes.join(" ") : "."}`),
-      ].join("\n");
-      await enqueue(this.state, date, "watchlist", this.redact(text), `coverage/${date}/${text}`);
-    }
     for (const [id, entry] of Object.entries(data.watchlist)) {
-      if (entry.notice) await enqueue(this.state, id, "watchlist", entry.notice, `${id}/outcome`);
+      if (entry.notice && data.proposals?.[id]?.status === "added") await enqueue(this.state, id, "watchlist", entry.notice, `${id}/outcome`, "watchlist-addition");
     }
   }
 

@@ -98,53 +98,34 @@ docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker te
 ```
 
 Ricrea il worker con `docker compose -p tradingsim -f deploy/compose.yaml up -d --no-build`
-per caricare la configurazione. Le notifiche Paper in coda vengono ritentate
-dal worker. Durante il monitoraggio delle notizie, le novità che potrebbero
-incidere su strumenti Paper vengono analizzate da Codex e possono produrre un
-avviso prima della prossima sveglia. Questo controllo non invia ordini.
-Gli stati degli ordini vengono notificati quando osservati dal broker. I resoconti
-lunghi arrivano in più messaggi numerati. Se Telegram accetta un invio ma
-la risposta si perde, il ritentativo può produrre un duplicato.
+per caricare la configurazione. Telegram invia automaticamente solo gli
+aggiornamenti degli ordini Paper verificati e le aggiunte già salvate alla
+watchlist. Il controllo dello stato degli ordini tra le sveglie avviene
+circa ogni minuto. I resoconti, i briefing, le notizie e i grafici restano
+locali, anche se erano già in coda. Se Telegram accetta un invio ma la
+risposta si perde, il ritentativo può produrre un duplicato.
 
-Alle sveglie lo scenario sui grafici viene inviato separatamente se l’analisi
-individua una direzione con dati sufficienti. Il messaggio riporta intervallo,
-ragione, invalidazione e data dell’ultima candela disponibile. Per richiedere
-subito la stessa analisi di mercato, usa il comando di sola lettura:
+`chart-report` produce un resoconto locale senza inviare ordini o messaggi.
 
-```sh
-docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts chart-report
-```
+### Permesso e revisione della watchlist
 
-### Scoperta automatica della watchlist
-
-Il worker avvia una scansione al massimo ogni 15 minuti. Se gli analisti
-delle notizie e dei grafici confermano entrambi il candidato, lo aggiunge
-direttamente alla watchlist e accoda una conferma Telegram. La scansione
-funziona anche senza Telegram configurato. L’aggiunta abilita il solo
-monitoraggio e non cambia l’universo negoziabile.
-
-La scansione valuta un paniere esplicito di azioni, forex, futures, crypto e
-CFD. Un candidato deve muoversi almeno 1,5 volte la mediana dei movimenti
-giornalieri recenti e avere una variazione coerente su 60 minuti pari almeno
-al 20% della mediana. Usa candele intraday chiuse e rifiuta dati oltre 90
-minuti o con un'ora discontinua. Il volume relativo è indicato quando
-disponibile. La proposta riporta ticker, mercato, fonte e ultimo dato.
-Il riepilogo segnala le fonti indisponibili o con dati insufficienti.
-
-Il worker legge Yahoo Finance (`query1.finance.yahoo.com`) per i grafici del
-paniere e la cache Alpaca News per le notizie associate. L'oro `GC=F` è
-la serie continua front-month Yahoo. Il CFD OANDA `SPX500_USD` è identificato
-per provider, ma le rilevazioni riguardano solo il sottostante `^GSPC`.
-Quotazioni, spread e disponibilità del CFD non vengono verificati.
-
-Il volume `state` conserva la watchlist e le conferme in `watchlist.json`.
-Al riavvio il worker ripristina gli avvisi dalla watchlist salvata. L’API
-Telegram può duplicare materialmente un messaggio se la risposta di
-consegna si perde. Gli strumenti già presenti rimangono unici.
+La scansione propone strumenti dopo la conferma dei due analisti.
+Per leggere le proposte in attesa e concedere il tuo permesso usa il
+terminale del worker. Sostituisci `ID_PROPOSTA` con l’ID restituito:
 
 ```sh
-# Legge solo le fonti del paniere senza inviare messaggi o modificare la watchlist
-docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts discovery-scan
-# Legge la copertura osservata e la watchlist dal volume
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts watchlist-pending
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts watchlist-approve ID_PROPOSTA
 docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts discovery-status
 ```
+
+Il permesso abilita la revisione, che può respingere la proposta. Il
+revisore verifica il segnale aggiornato, mette a confronto fonti
+indipendenti e chiede un riscontro ai due analisti. I confronti usano
+Stooq o Coinbase Exchange quando sono disponibili. Se mancano prove
+sufficienti, lo strumento resta fuori. Le aggiunte abilitate sono di
+solo monitoraggio e l’universo negoziabile resta invariato.
+
+`discovery-scan` legge i dati di mercato senza inviare messaggi né
+modificare la watchlist. `discovery-status` mostra la copertura osservata
+e l’esito delle revisioni. La scansione parte al massimo ogni 15 minuti.

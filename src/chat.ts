@@ -7,9 +7,11 @@ export type Message = {
   text: string;
   kind?: Kind;
   delivered?: string;
+  queuedAt?: string;
   attempts?: number;
   error?: string;
   partsSent?: number;
+  notification?: "order" | "watchlist-addition";
   retryAt?: string;
 };
 export interface Channel { send(message: Message, checkpoint: (partsSent: number) => Promise<void>): Promise<void> }
@@ -30,26 +32,36 @@ export class FakeChannel implements Channel {
   }
 }
 
-export async function enqueue(state: State, run: string, kind: Kind, content: string, dedupeKey?: string) {
+export const outboxId = (kind: Kind, key: string) => `${kind}-${createHash("sha256").update(key).digest("hex")}`;
+
+export async function enqueue(state: State, run: string, kind: Kind, content: string, dedupeKey?: string, notification?: Message["notification"]) {
   const id = dedupeKey === undefined
     ? `${run}-${kind}-${crypto.randomUUID()}`
-    : `${kind}-${createHash("sha256").update(dedupeKey).digest("hex")}`;
+    : outboxId(kind, dedupeKey);
   const path = `outbox/${id}.json`;
   if (dedupeKey !== undefined && await state.read<Message>(path)) return;
-  await state.write(path, { id, kind, text: `run ${run}\n${content}` });
+  await state.write(path, { id, kind, text: `run ${run}\n${content}`, queuedAt: new Date().toISOString(), notification }, dedupeKey !== undefined);
 }
 
-export async function flush(state: State, channel: Channel, now?: Date) {
+export async function flush(state: State, channel: Channel, now?: Date, select?: (message: Message) => Promise<Message | undefined>) {
   const currentTime = () => now ?? new Date();
-  for (const file of await state.list("outbox")) {
+  const files = await state.list("outbox");
+  const records = await Promise.all(files.map(async file => {
     const path = `outbox/${file}`;
-    const message = await state.read<Message>(path);
+    return { path, message: await state.read<Message>(path) };
+  }));
+  if (select) records.sort((a, b) => (a.message?.queuedAt ?? "").localeCompare(b.message?.queuedAt ?? ""));
+  for (const record of records) {
+    const { path } = record;
+    let { message } = record;
     if (!message || message.delivered) continue;
     // Elimina le richieste interattive rimaste in coda dalla versione precedente.
     if (message.kind === "watchlist" && "buttons" in message && Array.isArray(message.buttons) && message.buttons.length) {
       await state.remove(path);
       continue;
     }
+    if (select) message = await select(message);
+    if (!message) continue;
     if (message.retryAt && Date.parse(message.retryAt) > +currentTime()) break;
     message.attempts = (message.attempts ?? 0) + 1;
     delete message.retryAt;

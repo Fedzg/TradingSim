@@ -31,15 +31,15 @@ Un invio incerto rimane registrato e viene riconciliato per ID senza reinvio
 automatico. Se il broker non rende l'esito verificabile, controlla il registro
 `intents/` e il conto Paper prima di intervenire.
 
-I resoconti, gli allarmi, le notizie selezionate, le aggiunte alla watchlist e
-gli aggiornamenti degli ordini Paper sono persistiti in `outbox/`.
-Per riceverli su Telegram configura il [canale HTTP](deploy/README.md#telegram).
-`bun run status` mostra la coda e il motivo di mancata consegna.
-Per una prova offline, il canale finto scrive in `fake-chat/`. Se si simula
-un errore con `TRADINGSIM_FAKE_CHAT_FAIL=1`, lo si può ritentare con
-`bun src/cli.ts deliver --fake`, che esegue solo la consegna.
+Telegram invia automaticamente solo gli aggiornamenti degli ordini Paper
+confermati dal broker e le aggiunte salvate nella watchlist. Gli altri
+messaggi in coda, compresi i resoconti, le notizie e i grafici, restano
+consultabili localmente. Lo stato e il testimone sono visibili con
+`bun run status`; i resoconti si trovano in `state/history/` e i log in
+`state/logs/`.
 
-Per la ricerca di nuovi strumenti e l’aggiunta diretta dopo la conferma dei due
-analisti, vedi [Scoperta automatica della watchlist](deploy/README.md#scoperta-automatica-della-watchlist).
+Le proposte per la watchlist si consultano su richiesta. L’aggiunta richiede
+prima il permesso dell’operatore e poi una revisione indipendente.
+Vedi [Permesso e revisione della watchlist](deploy/README.md#permesso-e-revisione-della-watchlist).
 
 Vedi [Contribuire](CONTRIBUTING.md#italiano) e [Sicurezza](SECURITY.md#italiano).
