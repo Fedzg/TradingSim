@@ -7,6 +7,7 @@ import { AlpacaStdio } from "./mcp";
 import { Market } from "./market";
 import { run } from "./run";
 import { State } from "./state";
+import { TelegramChannel } from "./telegram";
 import { nextWake, rome, slots, wake, type Slot } from "./time";
 
 const bun = process.execPath;
@@ -23,7 +24,8 @@ const opts = await config(fake);
 const state = new State(opts.root);
 const mcp = fake ? undefined : new AlpacaStdio(opts.key, opts.secret);
 const market = new Market(mcp, fake);
-const channel = fake ? new FakeChannel(state, process.env.TRADINGSIM_FAKE_CHAT_FAIL === "1") : new UnavailableChat();
+const telegram = opts.telegram && new TelegramChannel(opts.telegram.token, opts.telegram.chatId);
+const channel = fake ? new FakeChannel(state, process.env.TRADINGSIM_FAKE_CHAT_FAIL === "1") : telegram ?? new UnavailableChat();
 const paper = () => fake ? new FakeBroker(state) : new Alpaca(mcp!);
 const mode = fake ? ["--fake"] : [];
 await mkdir(state.root, { recursive: true, mode: 0o700 });
@@ -148,6 +150,11 @@ try {
       await paper().account();
       console.log(fake ? "Lettura MCP finta riuscita." : "Lettura MCP del conto Alpaca Paper riuscita.");
       break;
+    case "telegram-check":
+      if (!telegram) throw new Error("Configura Telegram per inviare il messaggio di prova.");
+      await telegram.send({ id: "telegram-check", text: "Connessione Telegram riuscita. Questo è un messaggio di prova." }, async () => {});
+      console.log("Messaggio di prova Telegram inviato.");
+      break;
     case "deliver": process.exitCode = exitStatus(await child("outbox.guard", "_flush", mode).exited); break;
     case "schedule": await supervise(); break;
     case "_schedule": await schedule(); break;
@@ -170,7 +177,7 @@ try {
         wake(scheduledDate, rawSlot as Slot), force);
       break;
     }
-    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check.");
+    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check, telegram-check.");
   }
 } catch (error) {
   console.error(opts.redact(String(error)));

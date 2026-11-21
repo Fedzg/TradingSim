@@ -1,6 +1,6 @@
 # Worker cloud
 
-Serve una VM Linux sempre accesa con Docker Engine e Compose v2, un disco persistente
+Serve una VM Linux sempre accesa con Docker Engine e Compose v2.24 o successivo, un disco persistente
 per il data root di Docker e accesso HTTPS a ChatGPT, Alpaca Paper, Alpaca Data e Yahoo
 Finance. Mantieni un solo worker e lo stesso nome progetto Compose `tradingsim`.
 I volumi `state` e `codex` contengono rispettivamente dati dell'app e login ChatGPT.
@@ -71,3 +71,34 @@ Configura Docker per l'avvio al boot. Verifica che il recupero dei segreti prece
 il riavvio automatico dei container, oppure avvia Compose dal servizio di boot
 del provider dopo il recupero dei segreti. Il disco va protetto con permessi
 privati e conservato anche se la VM viene sostituita.
+
+## Telegram
+
+Crea un bot con [@BotFather](https://t.me/BotFather), apri la chat con il nuovo
+bot e premi **Avvia**. Puoi ricavare l'ID numerico della chat da
+`message.chat.id` nella risposta a [getUpdates](https://core.telegram.org/bots/api#getupdates)
+del tuo bot. Verifica che la chat sia quella prevista: i resoconti possono
+contenere dati del tuo conto Alpaca Paper.
+
+Conserva `telegram.env` nella directory privata indicata da
+`TRADINGSIM_SECRETS_DIR`, insieme ai file Alpaca, fuori dal checkout. Su
+Linux usa proprietario `root` e permessi `0400`. Il file contiene due righe:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=token-del-bot
+TELEGRAM_CHAT_ID=id-numerico-della-chat
+```
+
+Consenti HTTPS in uscita verso `api.telegram.org`. Dalla radice del repository,
+dopo la build, verifica la destinazione con un messaggio di prova:
+
+```sh
+docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker telegram-check
+```
+
+Ricrea il worker con `docker compose -p tradingsim -f deploy/compose.yaml up -d --no-build`
+per caricare la configurazione. Le notifiche Paper in coda vengono ritentate
+dal worker. Le notizie vengono selezionate durante le sveglie e gli stati
+degli ordini vengono notificati quando osservati dal broker. I resoconti
+lunghi arrivano in più messaggi numerati. Se Telegram accetta un invio ma
+la risposta si perde, il ritentativo può produrre un duplicato.

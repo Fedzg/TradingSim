@@ -1,4 +1,5 @@
 secrets.ts
+telegram.env
 .env*
 state/
 state-fake/

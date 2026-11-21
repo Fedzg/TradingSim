@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     stop_grace_period: 45s
     command: ["schedule"]
+    env_file:
+      - path: "${TRADINGSIM_SECRETS_DIR:-/run/tradingsim-secrets}/telegram.env"
+        required: false
     environment:
       ALPACA_PAPER_TRADE: "true"
       APCA_API_KEY_ID_FILE: /run/secrets/alpaca-key

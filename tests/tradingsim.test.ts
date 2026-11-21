@@ -4,12 +4,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FakeAgents, reviewOrder, type Agents, type Decision, type Role } from "../src/agents";
 import { FakeBroker, FakeMcp, type Position, type Proposal } from "../src/broker";
-import { FakeChannel, flush, type Message } from "../src/chat";
+import { enqueue, FakeChannel, flush, type Message } from "../src/chat";
 import type { Mcp } from "../src/mcp";
 import { Market } from "../src/market";
 import { ticketFor } from "../src/risk";
 import { run } from "../src/run";
 import { State } from "../src/state";
+import { TelegramChannel } from "../src/telegram";
 import { rome, wake } from "../src/time";
 
 const roots: string[] = [];
@@ -144,6 +145,43 @@ test("consegna fallita e ritentata senza inviare nuovi ordini", async () => {
   await flush(f.state, new FakeChannel(f.state));
   expect((await f.messages())[0]?.delivered).toBeDefined();
   expect((await f.broker.orders()).length).toBe(1);
+});
+
+test("conferme ordine e notizie già osservate non producono nuove notifiche", async () => {
+  const f = await fixture();
+  await f.start();
+  await f.start(opening, true);
+  const messages = await f.messages();
+  expect(messages.filter(message => message?.kind === "ordine").map(message => message?.text))
+    .toEqual([expect.stringContaining("accettato")]);
+  expect(messages.filter(message => message?.kind === "notizia")).toHaveLength(1);
+});
+
+test("Telegram riprende dalla parte rimasta in coda dopo un limite di invio", async () => {
+  const f = await fixture();
+  const sent: { chat_id: string; text: string; link_preview_options: { is_disabled: boolean } }[] = [];
+  const request = (async (url: string, init: RequestInit) => {
+    expect(url).toBe("https://api.telegram.org/bot123:simulato/sendMessage");
+    expect(init.method).toBe("POST");
+    sent.push(JSON.parse(init.body as string));
+    if (sent.length === 2) return Response.json({ ok: false, parameters: { retry_after: 45 } }, { status: 429 });
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+  await enqueue(f.state, opening.id, "resoconto", "x".repeat(3900) + "📊".repeat(70));
+  const channel = new TelegramChannel("123:simulato", "123456", request);
+  await flush(f.state, channel, now);
+  const [queued] = await f.messages();
+  expect(queued).toMatchObject({ partsSent: 1, attempts: 1, retryAt: "2026-09-24T13:40:45.000Z" });
+  await flush(f.state, channel, new Date(+now + 30_000));
+  expect(sent).toHaveLength(2);
+  await flush(f.state, channel, new Date(+now + 45_000));
+  expect(sent).toHaveLength(3);
+  expect(sent[2]).toEqual(sent[1]);
+  expect(sent[0]).toMatchObject({ chat_id: "123456", link_preview_options: { is_disabled: true } });
+  expect(sent[0].text).toStartWith("TradingSim · Resoconto (1/2)");
+  expect(sent[1].text).toStartWith("TradingSim · Resoconto (2/2)");
+  expect(sent.every(message => message.text.length <= 4096)).toBe(true);
+  expect((await f.messages())[0]?.delivered).toBeDefined();
 });
 
 test("mercato chiuso blocca anche gli stop; fuso Roma con e senza ora legale", async () => {

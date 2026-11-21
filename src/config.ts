@@ -15,7 +15,13 @@ export async function config(fake: boolean) {
     if (file) return (await Bun.file(file).text()).trim();
     return process.env[name] || local[name] || "";
   }));
-  const values = [key, secret].filter(Boolean);
+  const token = fake ? "" : (process.env.TELEGRAM_BOT_TOKEN ?? "").trim();
+  const chatId = fake ? "" : (process.env.TELEGRAM_CHAT_ID ?? "").trim();
+  if ((token || chatId) && (!/^\d+:[\w-]+$/.test(token) || !/^-?\d+$/.test(chatId))) {
+    throw new Error("Configurazione Telegram non valida. Verifica TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.");
+  }
+  const telegram = token ? { token, chatId } : undefined;
+  const values = [key, secret, token].filter(Boolean);
   const redact = (value: string) => values.reduce((result, credential) => result.replaceAll(credential, "[omesso]"), value);
-  return { key, secret, redact, root: resolve(process.env.TRADINGSIM_STATE_DIR || ".", fake ? "state-fake" : "state") };
+  return { key, secret, telegram, redact, root: resolve(process.env.TRADINGSIM_STATE_DIR || ".", fake ? "state-fake" : "state") };
 }

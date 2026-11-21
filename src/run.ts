@@ -35,6 +35,9 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
   const confirmed = new Map<string, BrokerOrder>();
   const errorText = (error: unknown) => redact(error instanceof Error ? error.message : "Errore inatteso.");
   const note = (message: string) => lines.push(redact(message));
+  const notifyOrder = (order: BrokerOrder) => enqueue(state, entry.id, "ordine",
+    redact(`${order.symbol} ${order.side === "buy" ? "acquisto" : "vendita"} × ${order.qty}\n${observed(order, brokerLabel)}`),
+    JSON.stringify([order.client_order_id, order.status, Number(order.filled_qty)]));
   if (warning) alerts.push(warning);
   if (interrupted) alerts.push(`Sveglia ${interrupted.wake.id} interrotta. Verifica degli intenti registrati con Alpaca.`);
   if (previous) {
@@ -52,6 +55,9 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     try {
       const order = await broker.find(intent.id);
       if (order) {
+        if (order.status !== intent.observed?.status || Number(order.filled_qty) !== Number(intent.observed?.filled_qty)) {
+          await notifyOrder(order);
+        }
         await state.write(`intents/${intent.id}.json`, { ...intent, observed: order });
         confirmed.set(intent.id, order);
         note(observed(order, brokerLabel));
@@ -119,6 +125,7 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     try {
       const result = await broker.submit(intent);
       if (result.client_order_id !== id) throw new Error("ID inatteso nella risposta di Alpaca.");
+      await notifyOrder(result);
       await state.write(`intents/${id}.json`, { ...intent, observed: result });
       confirmed.set(id, result);
       note(observed(result, brokerLabel));
@@ -177,13 +184,16 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
   for (const item of newsAnalysis?.limitations ?? []) note(item);
   for (const event of newsAnalysis?.events ?? []) {
     if (news?.articles.some(article => article.link === event.link && article.published === event.published && article.source === event.source)) {
-      note(`${event.classification}: ${event.title} (${event.symbols.join(", ")}). ${event.impact} — ${event.source}, ${event.published}, ${event.link}`);
+      const summary = `${event.classification}: ${event.title} (${event.symbols.join(", ")}). ${event.impact} — ${event.source}, ${event.published}, ${event.link}`;
+      note(summary);
+      await enqueue(state, entry.id, "notizia", redact(summary), JSON.stringify([event.link, event.published]));
     }
   }
   for (const idea of newsAnalysis?.newMarkets ?? []) {
     const source = news?.articles.find(article => article.link === idea.link && article.published === idea.published && article.source === idea.source);
     if (!source || watched.some(symbol => symbol.toUpperCase() === idea.symbol.toUpperCase())) continue;
-    await enqueue(state, entry.id, "mercato", redact(`Vuoi aggiungere ${idea.name} (${idea.symbol}) al monitoraggio? ${idea.event}. ${idea.reason}. Fonte: ${source.source}, ${source.published}, ${source.link}`));
+    await enqueue(state, entry.id, "mercato", redact(`Vuoi aggiungere ${idea.name} (${idea.symbol}) al monitoraggio? ${idea.event}. ${idea.reason}. Fonte: ${source.source}, ${source.published}, ${source.link}`),
+      JSON.stringify([idea.symbol.toUpperCase(), source.link, source.published]));
   }
 
   const context = { entry, account: snapshot?.account, positions: snapshot?.positions, recentOrders: snapshot?.orders.slice(0, 30),
@@ -222,7 +232,10 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     note(`Conto: USD ${snapshot.account.equity}. P&L del giorno: USD ${(Number(snapshot.account.equity) - Number(snapshot.account.last_equity)).toFixed(2)}. Orologio (${brokerLabel}): ${snapshot.clock.timestamp}.`);
     for (const order of snapshot.orders.filter(x => lock.intents.includes(x.client_order_id))) {
       const status = observed(order, brokerLabel);
-      if (!lines.includes(status)) note(status);
+      if (!lines.includes(status)) {
+        note(status);
+        await notifyOrder(order);
+      }
       if (terminal.has(order.status)) pending.delete(order.client_order_id);
     }
   } else note("Conto e P&L del giorno non verificati.");

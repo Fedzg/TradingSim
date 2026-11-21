@@ -1,5 +1,6 @@
 .git
 secrets.ts
+**/telegram.env
 .env*
 state*
 node_modules

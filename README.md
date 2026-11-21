@@ -30,9 +30,10 @@ Un invio incerto rimane registrato e viene riconciliato per ID senza reinvio
 automatico. Se il broker non rende l'esito verificabile, controlla il registro
 `intents/` e il conto Paper prima di intervenire.
 
-Il resoconto di ogni sveglia, gli allarmi e le domande sui mercati sono
-persistiti nella coda `outbox/`. La consegna a questa conversazione non è
-disponibile. `bun run status` mostra la coda e il motivo di mancata consegna.
+I resoconti, gli allarmi, le notizie selezionate, i nuovi mercati proposti e
+gli aggiornamenti degli ordini Paper sono persistiti in `outbox/`.
+Per riceverli su Telegram configura il [canale HTTP](deploy/README.md#telegram).
+`bun run status` mostra la coda e il motivo di mancata consegna.
 Per una prova offline, il canale finto scrive in `fake-chat/`. Se si simula
 un errore con `TRADINGSIM_FAKE_CHAT_FAIL=1`, lo si può ritentare con
 `bun src/cli.ts deliver --fake`, che esegue solo la consegna.
