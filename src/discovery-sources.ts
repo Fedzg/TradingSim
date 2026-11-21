@@ -1,3 +1,4 @@
+import { closedCandles, marketEvidence, pct, relativeVolume, type MarketEvidence } from "./indicators";
 import { yahoo, type Series } from "./market";
 
 export const categories = ["azioni", "forex", "futures", "crypto", "CFD"] as const;
@@ -16,33 +17,27 @@ export const catalog: readonly Instrument[] = [
 ];
 
 export type Evidence = { url: string; source: string; at: string; detail: string };
-export type Candidate = { instrument: Instrument; market: Evidence; metrics: Trend };
+export type Candidate = { instrument: Instrument; market: Evidence; metrics: Trend; indicators?: MarketEvidence };
 type Trend = { dayPct: number; hourPct: number; typicalDayPct: number; relativeMove: number; volumeMultiple: number | null; lastClose: number; invalidation: number; at: string };
-type Bar = Series["intervals"][string][number];
 const hour = 3600_000;
-const pct = (from: number, to: number) => 100 * (to / from - 1);
-const validBar = (bar: Bar) => Number.isFinite(bar.c) && bar.c > 0 && Number.isFinite(Date.parse(bar.t));
 
 export function trend(series: Series, now: Date): { metrics?: Trend; problem?: string } {
-  const daily = series.intervals["1Day"]?.filter(validBar) ?? [];
-  const intra = series.intervals["15Min"]?.filter(bar => validBar(bar) && Date.parse(bar.t) + 15 * 60_000 <= +now) ?? [];
+  const daily = closedCandles(series, "1Day", now);
+  const intra = closedCandles(series, "15Min", now);
   const last = intra.at(-1);
   if (daily.length < 16 || intra.length < 5 || !last) return { problem: "Servono almeno 16 sedute e 5 candele a 15 minuti." };
   const age = +now - Date.parse(last.t);
   if (age < 0 || age > 90 * 60_000 || intra.slice(-5).slice(1).some((bar, i) => Date.parse(bar.t) - Date.parse(intra.at(-5 + i)!.t) !== 15 * 60_000)) return { problem: "Candele a 15 minuti vecchie o discontinue." };
-  const days = daily.slice(-22, -1);
+  const days = daily.slice(-21);
   if (+now - Date.parse(days.at(-1)!.t) > 5 * 24 * hour) return { problem: "Serie giornaliera non recente." };
   const moves = days.slice(1).map((bar, i) => Math.abs(pct(days[i].c, bar.c))).sort((a, b) => a - b);
   const typicalDayPct = moves[Math.floor(moves.length / 2)];
   if (!(typicalDayPct > 0)) return { problem: "Volatilità storica non misurabile." };
-  // La candela giornaliera più recente può essere ancora aperta.
   const dayPct = pct(days.at(-1)!.c, last.c);
   const hourPct = pct(intra.at(-5)!.c, last.c);
   const relativeMove = Math.abs(dayPct) / typicalDayPct;
   if (relativeMove < 1.5 || Math.abs(hourPct) < typicalDayPct * 0.2 || Math.sign(dayPct) !== Math.sign(hourPct)) return {};
-  const previous = intra.slice(-21, -1).map(bar => bar.v).filter((v): v is number => v !== null && Number.isFinite(v) && v > 0);
-  const mean = previous.reduce((sum, volume) => sum + volume, 0) / previous.length;
-  const volumeMultiple = previous.length >= 10 && last.v !== null && last.v > 0 ? last.v / mean : null;
+  const volumeMultiple = relativeVolume(intra);
   return { metrics: { dayPct, hourPct, typicalDayPct, relativeMove, volumeMultiple, lastClose: last.c,
     invalidation: intra.at(-5)!.c, at: last.t } };
 }
@@ -58,11 +53,12 @@ export async function scan(now: Date, load = readSeries) {
   const observations = await Promise.all(catalog.map(async instrument => {
     try {
       const series = await load(instrument);
-      return { instrument, ...trend(series, now) };
+      const signal = trend(series, now);
+      return { instrument, ...signal, indicators: signal.metrics ? marketEvidence(series, now) : undefined };
     } catch { return { instrument, problem: "Serie Yahoo Finance non raggiungibile o non valida." }; }
   }));
-  const candidates = observations.flatMap(({ instrument, metrics }) => metrics ? [{
-    instrument, metrics, market: { url: quoteUrl(instrument.ticker), source: "Yahoo Finance", at: metrics.at,
+  const candidates = observations.flatMap(({ instrument, metrics, indicators }) => metrics ? [{
+    instrument, metrics, indicators, market: { url: quoteUrl(instrument.ticker), source: "Yahoo Finance", at: metrics.at,
       detail: `Movimento giornaliero ${metrics.dayPct.toFixed(2)}%, ${metrics.relativeMove.toFixed(2)}× la volatilità tipica; 60 minuti ${metrics.hourPct.toFixed(2)}%. Volume ${metrics.volumeMultiple?.toFixed(2) ?? "non disponibile"}${metrics.volumeMultiple === null ? "" : "×"}.` },
   }] : []);
   return { candidates, coverage: categories.map(category => {

@@ -3,11 +3,13 @@ import { config } from "./config";
 import { Alpaca, FakeBroker } from "./broker";
 import { ask, CodexAgents, FakeAgents, type Charts } from "./agents";
 import { Discovery, savedWatchlist } from "./discovery";
+import { measureAgents, measureFeed } from "./efficiency-metrics";
+import { chartContext } from "./indicators";
 import { readSeries, scan } from "./discovery-sources";
 import { chartScenarios } from "./chart-scenarios";
 import { enqueue, FakeChannel, UnavailableChat, type Message } from "./chat";
 import { AlpacaStdio } from "./mcp";
-import { Market } from "./market";
+import { fakeCharts, Market } from "./market";
 import { flushNotifications, notificationSelector, pollOrders } from "./notifications";
 import { queueNewsSignals } from "./news-signals";
 import { run } from "./run";
@@ -144,7 +146,7 @@ async function schedule() {
           });
         }
       }
-      if (!fake && !discovering) {
+      if (!discovering) {
         discovering = true;
         background("discovery.guard", "_discover");
       }
@@ -189,8 +191,9 @@ try {
       break;
     case "chart-report": {
       const now = new Date();
-      const charts = await (await marketWithWatchlist()).charts(now);
-      const analysis = await ask<Charts>(fake ? new FakeAgents() : new CodexAgents(opts.redact), "charts", { now, charts });
+      const model = measureAgents("chart-report", fake ? new FakeAgents() : new CodexAgents(opts.redact));
+      const charts = await measureFeed("charts", async () => (await marketWithWatchlist()).charts(now));
+      const analysis = await ask<Charts>(model.agents, "charts", chartContext(charts, now)).finally(model.log);
       const scenarios = chartScenarios(analysis, charts, now)
         ?? "Nessuno scenario direzionale con dati sufficienti nell’ultimo controllo.";
       const { date, time } = rome(now);
@@ -204,7 +207,7 @@ try {
     case "_news": {
       const previous = await market.cachedNews(state);
       const now = new Date();
-      const news = await market.poll(state, now);
+      const news = await measureFeed("news", () => market.poll(state, now));
       if (news.error && news.error !== previous.error) {
         const { date, time } = rome(now);
         await enqueue(state, `${date}-${time.replace(":", "")}-news`, "allarmi",
@@ -213,7 +216,8 @@ try {
       console.log(`Monitor notizie: ${news.error ?? `${news.articles.length} articoli in cache`}; ultimo aggiornamento ${news.lastSuccess ?? "assente"}.`);
       if (!fake && !news.error) {
         try {
-          const queued = await queueNewsSignals(state, new CodexAgents(opts.redact), news, now, opts.redact);
+          const model = measureAgents("news", new CodexAgents(opts.redact));
+          const queued = await queueNewsSignals(state, model.agents, news, now, opts.redact).finally(model.log);
           console.log(`Notizie con possibile impatto Paper: ${queued} avvisi in coda.`);
         } catch (error) {
           console.error(opts.redact(`Analisi notizie operative non riuscita: ${String(error)}`));
@@ -255,16 +259,22 @@ try {
       break;
     }
     case "_discover": {
-      if (fake) break;
-      const engine = new Discovery(state, new CodexAgents(opts.redact), opts.redact);
+      const model = measureAgents("discovery", fake ? new FakeAgents() : new CodexAgents(opts.redact));
+      const engine = new Discovery(state, model.agents, opts.redact);
       const { scanAt } = await engine.status();
       const now = new Date();
       try {
-        await engine.reviewApproved(now);
         if (!scanAt || +now - Date.parse(scanAt) >= 15 * 60_000) {
-          await engine.collect(await scan(now), (await market.cachedNews(state)).articles, now);
+          const source = fake ? async (item: { symbol: string }) => ({ ...fakeCharts(now)[0], symbol: item.symbol }) : undefined;
+          const result = await measureFeed("discovery", () => scan(now, source));
+          await engine.collect(result, (await market.cachedNews(state)).articles, now);
         }
-      } finally { await engine.publish(); }
+        // Anche con una revisione operatore in attesa, il controllo dovuto ha priorità.
+        if (!fake) await engine.reviewApproved(now);
+      } finally {
+        await engine.publish();
+        model.log();
+      }
       break;
     }
     case "_orders": await pollOrders(state, paper(), opts.redact); break;

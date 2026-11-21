@@ -2,6 +2,8 @@ import { universe, type BrokerOrder, type Proposal, type Snapshot } from "./brok
 import type { Series } from "./market";
 import type { Wake } from "./time";
 
+export const riskLimits = { maxPositions: 5, maxExposure: 0.2, stopLoss: 0.03, wholeShares: true, shortSelling: false, leverage: false } as const;
+
 export const terminal = new Set(["filled", "canceled", "expired", "rejected", "replaced"]);
 export const trading = (wake: Wake, snapshot: Snapshot) => wake.slot !== "09:00" && snapshot.clock.is_open === true;
 
@@ -13,7 +15,7 @@ export function stops(snapshot: Snapshot): Proposal[] {
   return snapshot.positions.flatMap(position => {
     const avg = Number(position.avg_entry_price);
     const current = Number(position.current_price);
-    if (!(avg > 0 && current > 0 && current <= avg * 0.97)) return [];
+    if (!(avg > 0 && current > 0 && current <= avg * (1 - riskLimits.stopLoss))) return [];
     const qty = Math.floor(Math.min(Number(position.qty), Number(position.qty_available)));
     return [{ symbol: position.symbol, side: "sell", qty, reason: "Stop obbligatorio: perdita di almeno il 3% dal prezzo medio." }];
   });
@@ -52,10 +54,10 @@ export function risk(order: Proposal, limit: number | null, snapshot: Snapshot, 
   if (pending.some(x => !(Number(x.limit_price) > 0) || !Number.isFinite(remaining(x)))) return "Esposizione di un acquisto pendente non quantificabile.";
   const titles = new Set([...snapshot.positions.filter(x => Number(x.qty) !== 0).map(x => x.symbol),
     ...pending.filter(x => remaining(x) > 0).map(x => x.symbol), order.symbol]);
-  if (titles.size > 5) return "Il portafoglio supererebbe cinque titoli.";
+  if (titles.size > riskLimits.maxPositions) return "Il portafoglio supererebbe cinque titoli.";
   const cost = order.qty * limit;
   const pendingCost = (items: BrokerOrder[]) => items.reduce((sum, x) => sum + remaining(x) * Number(x.limit_price), 0);
   const exposure = Math.abs(Number(held?.market_value ?? 0)) + pendingCost(pending.filter(x => x.symbol === order.symbol)) + cost;
-  if (!(exposure <= Number(snapshot.account.equity) * 0.2)) return "L’esposizione supererebbe il 20% del conto o non è verificabile.";
+  if (!(exposure <= Number(snapshot.account.equity) * riskLimits.maxExposure)) return "L’esposizione supererebbe il 20% del conto o non è verificabile.";
   if (!(cost + pendingCost(pending) <= Number(snapshot.account.cash) && cost <= Number(snapshot.account.buying_power))) return "Liquidità disponibile insufficiente considerando gli ordini pendenti.";
 }

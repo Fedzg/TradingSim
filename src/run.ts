@@ -1,5 +1,8 @@
 import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAnalysis } from "./agents";
 import { FakeBroker, type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
+import { measureAgents, measureFeed } from "./efficiency-metrics";
+import { chartContext } from "./indicators";
+import { orderReviewContext } from "./order-review-context";
 import { chartScenarios } from "./chart-scenarios";
 import { enqueue } from "./chat";
 import { queueOrder } from "./notifications";
@@ -20,7 +23,13 @@ function observed(order: BrokerOrder, brokerLabel: string) {
   return `${order.client_order_id}: ${status} (${brokerLabel}), eseguite ${Number.isFinite(filled) ? filled : "quantità non verificabile"}/${order.qty}.`;
 }
 
-export async function run({ state, broker, agents, market, redact }: Inputs, entry: Wake, force: boolean, now = new Date()) {
+export async function run(input: Inputs, entry: Wake, force: boolean, now = new Date()) {
+  const metrics = measureAgents(`run/${entry.id}`, input.agents);
+  try { await runOnce({ ...input, agents: metrics.agents }, entry, force, now); }
+  finally { metrics.log(); }
+}
+
+async function runOnce({ state, broker, agents, market, redact }: Inputs, entry: Wake, force: boolean, now: Date) {
   const { baton: previous, warning } = await state.baton();
   const interrupted = await state.read<RunLock>("run.lock");
   if (!interrupted && previous && previous.wake.id >= entry.id && !force) return;
@@ -146,11 +155,11 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
     }
   }
 
-  try { charts = await market.charts(now); }
+  try { charts = await measureFeed("charts", () => market.charts(now)); }
   catch (error) { alerts.push(`Grafici indisponibili: ${errorText(error)}`); }
   try {
     news = await market.cachedNews(state);
-    if (!news.checked) news = await market.poll(state, now);
+    if (!news.checked) news = await measureFeed("news", () => market.poll(state, now));
     if (news.error || !news.lastSuccess || +now - Date.parse(news.lastSuccess) > 30 * 60_000) {
       alerts.push(`${news.error ?? "Cache notizie non recente."} Ultimo aggiornamento: ${news.lastSuccess ?? "assente"}.`);
     }
@@ -158,8 +167,8 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
 
   const monitored = [...new Set([...watched, ...charts.map(series => series.symbol)])];
   const analysts = await Promise.allSettled([
-    ask<Charts>(agents, "charts", { now, charts }),
-    ask<NewsAnalysis>(agents, "news", { now, news: news && { ...news, articles: news.articles.slice(0, 30) }, watched: monitored }),
+    ask<Charts>(agents, "charts", chartContext(charts, now)),
+    ask<NewsAnalysis>(agents, "news", { now, news: news && { ...news, articles: news.articles.slice(0, 30).map(article => ({ ...article, summary: article.summary.slice(0, 320) })) }, watched: monitored }),
   ]);
   if (analysts[0].status === "fulfilled") chartAnalysis = analysts[0].value;
   else alerts.push(`Analisi grafici mancante: ${errorText(analysts[0].reason)}`);
@@ -210,7 +219,9 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
         continue;
       }
       try {
-        const approval = await reviewOrder(agents, ticketFor(order, limit), context);
+        const pertinent = orderReviewContext(order, limit, snapshot, entry,
+          charts.find(series => series.symbol === order.symbol), chartAnalysis, newsAnalysis, now);
+        const approval = await reviewOrder(agents, ticketFor(order, limit), pertinent);
         if (approval.review.verdict !== "approve") {
           note(`Respinto dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
           continue;

@@ -129,3 +129,58 @@ solo monitoraggio e l’universo negoziabile resta invariato.
 `discovery-scan` legge i dati di mercato senza inviare messaggi né
 modificare la watchlist. `discovery-status` mostra la copertura osservata
 e l’esito delle revisioni. La scansione parte al massimo ogni 15 minuti.
+
+### Cache delle analisi e misure Codex
+
+Compose imposta `TRADINGSIM_CODEX_MODEL_SCAN=gpt-6.1-terra` per
+`newsSignals`, `discoveryNews` e `discoveryCharts`. Gli altri ruoli usano
+`TRADINGSIM_CODEX_MODEL=gpt-6.2-sol`. Puoi sovrascrivere entrambi i valori.
+Un valore di scansione vuoto usa il modello principale. Se manca anche
+quello principale, il CLI usa il suo predefinito.
+
+Lo scheduler controlla le notizie ogni 5 minuti per impostazione predefinita
+e avvia la scoperta ogni 15 minuti quando il processo precedente è terminato.
+La scoperta e le sveglie delle 09:00, 15:40, 18:30 e 21:40
+(`Europe/Rome`) usano processi e lock separati. Una scansione già in corso
+non ritarda l’avvio di una sveglia. In caso di sovraccarico non partono due
+scansioni concorrenti.
+
+`watchlist.json` conserva i verdetti dei due analisti, anche se negativi,
+con fonti, dati e ora dell’analisi. La chiave è categoria, mercato o provider
+e simbolo. La cache dura 60 minuti. Un errore o una risposta non valida
+viene ritentato alla scansione utile e non diventa un veto. Una candela
+nuova non invalida da sola il verdetto. La prima scansione utile rivaluta se:
+
+- cambia una fonte o una notizia pertinente fra le quattro più recenti;
+- cambia il segno del movimento giornaliero o orario, oppure il prezzo
+  oltrepassa il livello di invalidazione, anche se poi recupera;
+- la variazione giornaliera cambia di almeno il maggiore fra **0,25 punti
+  percentuali** e metà della volatilità giornaliera tipica. Per l’ora la
+  soglia è il maggiore fra **0,15 punti** e un quarto della volatilità;
+- il movimento relativo cambia di almeno **0,5×**, o il volume relativo
+  cambia di almeno il maggiore fra **0,5×** e il **30%** del riferimento.
+  Anche la perdita o il ritorno del dato di volume invalida il verdetto;
+- scade la cache. Dati di mercato troppo vecchi o incompleti non generano
+  un candidato nuovo.
+
+Ai grafici arrivano variazione, SMA 5/20, RSI 14, volume relativo, massimi
+e minimi recenti, fonti e timestamp. Il payload include al massimo sei
+candele a 15 minuti e quattro giornaliere per serie. Esclude le candele
+prima della chiusura dell’intervallo. Per il giornaliero considera
+concluso l’intervallo 24 ore dopo il timestamp della fonte. Indicatori
+mancanti sono `null`; i dati datati sono segnalati. Per la revisione di un
+ordine, il modello riceve i parametri esatti, la motivazione, i vincoli
+e le prove riferite a quel simbolo. Mantiene obiezioni, risposta e
+verdetto, con gli stessi controlli prima dell’invio.
+
+I log `feed.*` contano i controlli dei feed. `analysis.model` conta le
+invocazioni del modello per ruolo, durata e byte UTF-8 del payload JSON.
+`analysis.discovery-cache` riporta analisi nuove, riusi, rivalutazioni,
+errori e cause di invalidazione. I byte non sono token. Il benchmark
+riproducibile usa servizi finti e non misura tempi di rete o token del
+provider:
+
+```sh
+bun tests/fixtures/efficiency-bench.ts "$PWD"
+bun test
+```

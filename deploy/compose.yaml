@@ -14,6 +14,8 @@ services:
       ALPACA_PAPER_TRADE: "true"
       APCA_API_KEY_ID_FILE: /run/secrets/alpaca-key
       APCA_API_SECRET_KEY_FILE: /run/secrets/alpaca-secret
+      TRADINGSIM_CODEX_MODEL: "${TRADINGSIM_CODEX_MODEL-gpt-6.2-sol}"
+      TRADINGSIM_CODEX_MODEL_SCAN: "${TRADINGSIM_CODEX_MODEL_SCAN-gpt-6.1-terra}"
       TRADINGSIM_NEWS_SECONDS: "${TRADINGSIM_NEWS_SECONDS:-300}"
     volumes:
       - state:/var/lib/tradingsim

@@ -1,3 +1,4 @@
+import { closedCandles } from "./indicators";
 import type { Charts } from "./agents";
 import { universe } from "./broker";
 import type { Series } from "./market";
@@ -15,7 +16,7 @@ export function chartScenarios(analysis: Charts, charts: Series[], now: Date) {
     const key = `${idea.symbol}/${idea.horizon}`;
     if (idea.bias === "laterale" || seen.has(key)) continue;
     const series = charts.find(x => x.symbol === idea.symbol);
-    const bars = series?.intervals[idea.horizon === "15 minuti" ? "15Min" : "1Day"];
+    const bars = series && closedCandles(series, idea.horizon === "15 minuti" ? "15Min" : "1Day", now);
     const last = bars?.at(-1);
     if (!series || !bars || bars.length < 15 || !last || !Number.isFinite(last.c)) continue;
     const time = Date.parse(last.t);

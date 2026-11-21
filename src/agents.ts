@@ -32,6 +32,7 @@ const schemas = {
   review: obj({ verdict: choice("approve", "reject"), reason: s }),
 } satisfies Record<string, Schema>;
 export type Role = keyof typeof schemas;
+const scanRoles = new Set<Role>(["newsSignals", "discoveryNews", "discoveryCharts"]);
 export type Decision = { orders: Proposal[]; reasoning: string; planNext: string };
 export type Charts = { ideas: { symbol: string; horizon: "15 minuti" | "giornaliero"; bias: "rialzista" | "ribassista" | "laterale";
   direction: string; evidence: string; invalidation: string; uncertainty: string }[]; limitations: string[] };
@@ -42,7 +43,7 @@ type Review = { verdict: "approve" | "reject"; reason: string };
 export type Approval = { ticket: string; review: Review };
 
 const instructions: Record<Role, string> = {
-  charts: "Sei l’analista dei grafici. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Per ogni scenario seleziona un solo intervallo e un bias: rialzista o ribassista solo con evidenza nei dati; usa laterale quando il quadro è indeciso. Indica il motivo tecnico, un livello di invalidazione e le principali incertezze. Segnala ritardi e dati insufficienti. Evita probabilità numeriche e raccomandazioni. Analizza anche gli strumenti solo in monitoraggio.",
+  charts: "Sei l’analista dei grafici. Usa gli indicatori calcolati e le candele chiuse; i campi null sono lacune. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Per ogni scenario seleziona un solo intervallo e un bias: rialzista o ribassista solo con evidenza nei dati; usa laterale quando il quadro è indeciso. Indica il motivo tecnico, un livello di invalidazione e le principali incertezze. Segnala ritardi e dati insufficienti. Evita probabilità numeriche e raccomandazioni. Analizza anche gli strumenti solo in monitoraggio.",
   news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Segnala dati vecchi, lacune ed eventuali nuovi mercati motivati.",
   newsSignals: "Seleziona al massimo tre notizie che potrebbero cambiare materialmente la valutazione di un ordine simulato. Cerca fatti specifici e nuovi come risultati, guidance, eventi regolatori, decisioni delle banche centrali o dati macro a sorpresa. Scarta indiscrezioni, commenti, resoconti del movimento del prezzo e collegamenti generici ai ticker. Usa solo gli articleId e i simboli consentiti dell’articolo. Spiega in una frase il nesso con gli strumenti selezionati e l’eventuale incertezza. Non suggerire ordini. Restituisci signals vuoto se nessuna notizia supera questa soglia.",
   discoveryNews: "Sei l’analista delle notizie per la watchlist. Verifica corrispondenza esatta dello strumento, fonte, data e rilevanza. Distingui una notizia verificabile da un semplice movimento di mercato. Puoi confermare un candidato privo di notizie solo se la fonte di mercato identifica chiaramente lo strumento e il movimento è rilevante. Non inventare un catalizzatore. Cita solo sourceIds forniti.",
@@ -91,7 +92,10 @@ export class CodexAgents implements Agents {
         await chown(schema, 10001, 10001);
       }
       const launcher = isolated ? ["setpriv", "--reuid=10001", "--regid=10001", "--clear-groups", "--no-new-privs"] : [];
-      const proc = Bun.spawn([...launcher, "codex", "--ask-for-approval", "never", "exec", "--ephemeral", "--skip-git-repo-check",
+      const mainModel = process.env.TRADINGSIM_CODEX_MODEL?.trim();
+      const model = scanRoles.has(role) ? process.env.TRADINGSIM_CODEX_MODEL_SCAN?.trim() || mainModel : mainModel;
+      const modelArgs = model ? ["--model", model] : [];
+      const proc = Bun.spawn([...launcher, "codex", "--ask-for-approval", "never", "exec", ...modelArgs, "--ephemeral", "--skip-git-repo-check",
         "--ignore-user-config", "-c", "features.shell_tool=false", "-c", 'web_search="disabled"',
         "--sandbox", "read-only", "--output-schema", schema, "--output-last-message", result, "-"], {
         cwd: dir, env, stdin: new Blob([prompt]), stdout: "ignore", stderr: "ignore", timeout: 120_000, killSignal: "SIGKILL",
@@ -102,11 +106,15 @@ export class CodexAgents implements Agents {
   }
 }
 
-export async function reviewOrder(agents: Agents, ticket: string, context: unknown): Promise<Approval> {
-  const challenge = await ask(agents, "challenge", { ticket, context });
-  const answer = await ask<{ position: string }>(agents, "answer", { ticket, challenge, context });
+export async function reviewOrder(agents: Agents, ticket: string, context: Partial<import("./order-review-context").OrderReviewContext>): Promise<Approval> {
+  const { reason, risk, evidence } = context;
+  const challenge = await ask(agents, "challenge", { ticket, reason, risk, evidence });
+  const answer = await ask<{ position: string }>(agents, "answer", { ticket, reason, challenge,
+    risk: risk && { limits: risk.limits, estimatedCost: risk.estimatedCost, cash: risk.cash,
+      maxSymbolValue: risk.maxSymbolValue, projectedSymbolValue: risk.projectedSymbolValue, availableShares: risk.availableShares },
+    evidence });
   if (answer.position === "ritiro") return { ticket, review: { verdict: "reject", reason: "Proposta ritirata dal decisore." } };
-  return { ticket, review: await ask(agents, "review", { ticket, challenge, answer, context }) };
+  return { ticket, review: await ask(agents, "review", { ticket, reason, challenge, answer, risk, evidence }) };
 }
 
 export class FakeAgents implements Agents {

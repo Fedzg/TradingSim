@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { ask, type Agents, type Role } from "./agents";
+import { materialChange, type EvidenceSet } from "./analysis-cache";
+import { elapsed, metric } from "./efficiency-metrics";
+import { candleFields } from "./indicators";
 import { enqueue } from "./chat";
 import { readSeries, trend, type scan, type Candidate, type Evidence, type Instrument } from "./discovery-sources";
 import type { Article } from "./market";
@@ -7,7 +10,8 @@ import type { State } from "./state";
 import { reviewEvidence } from "./discovery-review-source";
 
 type Finding = { verdict: "approve" | "reject"; reason: string; doubt: string; sourceIds: string[] };
-type Sources = Record<string, Evidence>;
+type Sources = EvidenceSet;
+type CachedAnalysis = { candidate: Candidate; sources: Sources; analyzedAt: string; news: Finding; charts: Finding };
 type Challenge = { newsQuestion: string; chartsQuestion: string; objection: string };
 type Proposal = {
   candidate: Candidate; sources: Sources; news: Finding; charts: Finding; status: "pending" | "approved" | "rejected" | "added";
@@ -15,6 +19,7 @@ type Proposal = {
 };
 type Registry = {
   proposals?: Record<string, Proposal>;
+  analysisCache?: Record<string, CachedAnalysis>;
   scanAt?: string; coverage?: Awaited<ReturnType<typeof scan>>["coverage"];
   watchlist: Record<string, { instrument: Instrument; addedAt: string; notice?: string }>;
 };
@@ -34,9 +39,9 @@ function sourcesFor(candidate: Candidate, articles: Article[], now: Date): Sourc
     const age = +now - Date.parse(article.published);
     return (article.symbols.includes(item.ticker) || article.symbols.includes(item.symbol)) &&
       /^https:\/\//.test(article.link) && age >= 0 && age <= 36 * 3600_000;
-  }).slice(0, 4);
+  }).sort((a, b) => Date.parse(b.published) - Date.parse(a.published) || a.link.localeCompare(b.link)).slice(0, 4);
   return { mercato: candidate.market, ...Object.fromEntries(recent.map((article, index) => [
-    `notizia-${index + 1}`, { url: article.link, source: article.source, at: article.published, detail: `${article.title} · ${article.summary}` },
+    `notizia-${index + 1}`, { url: article.link, source: article.source, at: article.published, detail: `${article.title.slice(0, 180)} · ${article.summary.slice(0, 300)}` },
   ])) };
 }
 
@@ -45,6 +50,7 @@ async function find(agents: Agents, role: Role, input: object, sources: Sources,
   if ((result.verdict === "approve" && !result.sourceIds.length) ||
       result.sourceIds.some(id => !Object.hasOwn(sources, id)) ||
       (result.verdict === "approve" && required !== undefined && !result.sourceIds.includes(required))) {
+    if (role === "discoveryNews" || role === "discoveryCharts") throw new Error("Fonti citate non verificabili.");
     return { verdict: "reject", reason: "Le prove citate non sono verificabili nel fascicolo.", doubt: "Fonti insufficienti.", sourceIds: [] };
   }
   return result;
@@ -55,35 +61,65 @@ export class Discovery {
 
   // Il chiamante serializza le scansioni con discovery.guard.
   async collect(result: Awaited<ReturnType<typeof scan>>, articles: Article[], now: Date) {
+    const started = performance.now();
+    const counts = { fresh: 0, reused: 0, reevaluated: 0, errors: 0 };
+    const causes: Record<string, number> = {};
     const data = await registry(this.state);
     data.coverage = result.coverage;
+    const cache = data.analysisCache ??= {};
     const proposals = data.proposals ??= {};
     const ranked = result.candidates.filter(c => {
       const id = requestId(c.instrument);
       return !data.watchlist[id] && (!proposals[id] || proposals[id].status === "pending");
     })
       .sort((a, b) => b.metrics.relativeMove - a.metrics.relativeMove);
-    const scanned = new Set<Instrument["category"]>();
-    for (const candidate of ranked) {
-      if (scanned.has(candidate.instrument.category)) continue;
-      scanned.add(candidate.instrument.category);
+    const firstByCategory = new Set<Instrument["category"]>();
+    const work = ranked.flatMap(candidate => {
       const id = requestId(candidate.instrument);
       const sources = sourcesFor(candidate, articles, now);
-      const context = { candidate, now: now.toISOString() };
+      const previous = cache[id];
+      if (previous) {
+        const changed = materialChange(previous, candidate, sources, now);
+        if (changed) return [{ id, candidate, sources, changed }];
+        counts.reused++;
+        return [];
+      }
+      const category = candidate.instrument.category;
+      if (firstByCategory.has(category)) return [];
+      firstByCategory.add(category);
+      return [{ id, candidate, sources, changed: undefined }];
+    });
+    const analyze = async ({ id, candidate, sources, changed }: typeof work[number]) => {
+      if (changed) {
+        counts.reevaluated++;
+        causes[changed] = (causes[changed] ?? 0) + 1;
+      } else counts.fresh++;
+      const { instrument, market, metrics, indicators } = candidate;
+      const context = { instrument, market, metrics, now: now.toISOString() };
       const [news, charts] = await Promise.allSettled([
         find(this.agents, "discoveryNews", context, sources),
-        find(this.agents, "discoveryCharts", context, sources, "mercato"),
+        find(this.agents, "discoveryCharts", { ...context, indicators, candleFields }, { mercato: sources.mercato }, "mercato"),
       ]);
       if (news.status === "rejected" || charts.status === "rejected") {
+        counts.errors++;
         const coverage = data.coverage.find(item => item.category === candidate.instrument.category);
         coverage?.notes.push(`${candidate.instrument.symbol}: almeno un analista non ha restituito una verifica valida.`);
-        continue;
+        return;
       }
-      if (news.value.verdict !== "approve" || charts.value.verdict !== "approve") continue;
-      proposals[id] = { candidate, sources, news: news.value, charts: charts.value, status: "pending" };
+      const analyzedAt = now.toISOString();
+      cache[id] = { candidate, sources, news: news.value, charts: charts.value, analyzedAt };
+      if (news.value.verdict === "approve" && charts.value.verdict === "approve") {
+        proposals[id] = { candidate, sources, news: news.value, charts: charts.value, status: "pending" };
+      } else if (proposals[id]?.status === "pending") {
+        delete proposals[id];
+      }
+    };
+    for (let index = 0; index < work.length; index += 3) {
+      await Promise.all(work.slice(index, index + 3).map(analyze));
     }
     data.scanAt = now.toISOString();
     await this.state.write(path, data);
+    metric("analysis.discovery-cache", { ...counts, causes, elapsedMs: elapsed(started) });
   }
 
   async proposals() {
@@ -127,6 +163,7 @@ export class Discovery {
       await save();
     };
     const { candidate, sources } = proposal;
+    const { indicators: _indicators, ...candidateSummary } = candidate;
     if (proposal.checkedAt && +now - Date.parse(proposal.checkedAt) > 90 * 60_000) {
       return reject("Le prove aggiornate sono scadute durante la revisione.");
     }
@@ -141,11 +178,11 @@ export class Discovery {
       sources.aggiornato = { ...candidate.market, at: fresh.at,
         detail: `Giorno ${fresh.dayPct.toFixed(2)}%, ora ${fresh.hourPct.toFixed(2)}%, volume relativo ${fresh.volumeMultiple ?? "non disponibile"}, invalidazione ${fresh.invalidation}.` };
       sources.indipendente = independent;
-      proposal.challenge = await ask<Challenge>(this.agents, "discoveryChallenge", { candidate, sources, initial: [proposal.news, proposal.charts] });
+      proposal.challenge = await ask<Challenge>(this.agents, "discoveryChallenge", { candidate: candidateSummary, sources, initial: [proposal.news, proposal.charts] });
       proposal.checkedAt = fresh.at;
       await save();
     }
-    const context = { candidate, challenge: proposal.challenge, initial: [proposal.news, proposal.charts] };
+    const context = { candidate: candidateSummary, challenge: proposal.challenge, initial: [proposal.news, proposal.charts] };
     if (!proposal.newsAnswer) {
       proposal.newsAnswer = await find(this.agents, "discoveryNewsAnswer", context, sources);
       await save();

@@ -89,3 +89,34 @@ is unchanged.
 Use `discovery-scan` to probe data sources without notifying Telegram or
 changing the watchlist. Use `discovery-status` for coverage and the results
 of completed reviews.
+
+### Analysis cache and Codex measurements
+
+Compose defaults `TRADINGSIM_CODEX_MODEL_SCAN` to `gpt-6.1-terra` for
+`newsSignals`, `discoveryNews`, and `discoveryCharts`. Other roles use
+`TRADINGSIM_CODEX_MODEL`, which defaults to `gpt-6.2-sol`. Both values can be
+overridden. An empty scan value falls back to the main model. When the main
+value is empty, Codex uses its own default for roles without a model.
+
+News checks default to five minutes. Discovery is scheduled every 15
+minutes and does not overlap a previous scan. The 09:00, 15:40, 18:30 and
+21:40 Europe/Rome sessions launch independently of discovery.
+
+The watchlist state caches both positive and negative verdicts by asset
+category, provider or market, and symbol. The cache stores the inputs
+and lasts 60 minutes. News changes, directional changes, an invalidation
+breach, and significant price or volume changes trigger a new analysis.
+A new candle alone does not. For the precise thresholds see
+[the Italian guide](README.md#cache-delle-analisi-e-misure-codex).
+An invalid or failed response is retried and never cached as a veto.
+
+The chart prompt keeps precomputed indicators, timestamps, and a small
+window of closed candles. Order review still has three stages and gets
+only the proposal, risk constraints, and relevant evidence. Feed
+checks and model calls are logged separately. Model logs include calls
+by role, duration, and JSON payload bytes, which are not token counts.
+
+```sh
+bun tests/fixtures/efficiency-bench.ts "$PWD"
+bun test
+```

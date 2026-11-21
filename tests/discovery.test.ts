@@ -147,9 +147,12 @@ test("Telegram consegna una sola aggiunta salvata e conserva la copertura e i ve
   await f.engine().reviewApproved(now);
   await f.engine().publish();
   await flushNotifications(f.state, channel(), x => x);
+  await f.collect(); // Riparte dallo stato persistito, senza ricreare la proposta o l’aggiunta.
   await f.engine().publish();
   await flushNotifications(new State(f.state.root), channel(), x => x);
   expect(sent).toHaveLength(1);
+  expect(await savedWatchlist(f.state)).toHaveLength(1);
+  expect(await f.engine().proposals()).toEqual([]);
   expect(sent[0]).toContain("Aggiunto alla watchlist");
   expect(sent[0]).toContain("Motivo finale");
   expect((await f.messages()).filter(message => !message.delivered)).toHaveLength(2);
