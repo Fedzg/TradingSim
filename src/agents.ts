@@ -17,6 +17,7 @@ const schemas = {
   charts: obj({ ideas: arr(obj({ symbol: s, horizon: s, direction: s, evidence: s, invalidation: s, uncertainty: s })), limitations: arr(s) }),
   news: obj({ events: arr(obj({ title: s, source: s, link: s, published: s, symbols: arr(s), impact: s, classification: choice("fatto", "indiscrezione", "interpretazione") })),
     limitations: arr(s), newMarkets: arr(obj({ name: s, symbol: s, event: s, link: s, source: s, published: s, reason: s })) }),
+  newsSignals: obj({ signals: arr(obj({ articleId: qty, symbols: arr(s), reason: s })) }),
   decide: obj({ orders: arr(proposal), reasoning: s, planNext: s }),
   challenge: obj({ timing: s, invalidation: s, sizing: s, downside: s }),
   answer: obj({ timing: s, invalidation: s, sizing: s, downside: s, position: choice("confermo", "ritiro") }),
@@ -27,12 +28,14 @@ export type Decision = { orders: Proposal[]; reasoning: string; planNext: string
 export type Charts = { ideas: { symbol: string; horizon: string; direction: string; evidence: string; invalidation: string; uncertainty: string }[]; limitations: string[] };
 export type NewsAnalysis = { events: { title: string; source: string; link: string; published: string; symbols: string[]; impact: string; classification: string }[];
   limitations: string[]; newMarkets: { name: string; symbol: string; event: string; link: string; source: string; published: string; reason: string }[] };
+export type NewsSignals = { signals: { articleId: number; symbols: string[]; reason: string }[] };
 type Review = { verdict: "approve" | "reject"; reason: string };
 export type Approval = { ticket: string; review: Review };
 
 const instructions: Record<Role, string> = {
   charts: "Sei l’analista dei grafici. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Segnala ritardi, dati insufficienti e invalidazione esplicita. Analizza anche gli strumenti solo in monitoraggio.",
   news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Segnala dati vecchi, lacune ed eventuali nuovi mercati motivati.",
+  newsSignals: "Seleziona al massimo tre notizie che potrebbero cambiare materialmente la valutazione di un ordine simulato. Cerca fatti specifici e nuovi come risultati, guidance, eventi regolatori, decisioni delle banche centrali o dati macro a sorpresa. Scarta indiscrezioni, commenti, resoconti del movimento del prezzo e collegamenti generici ai ticker. Usa solo gli articleId e i simboli consentiti dell’articolo. Spiega in una frase il nesso con gli strumenti selezionati e l’eventuale incertezza. Non suggerire ordini. Restituisci signals vuoto se nessuna notizia supera questa soglia.",
   decide: "Sei il decisore. Proponi al massimo cinque ordini in azioni intere o nessun ordine. Motiva in 3–5 frasi anche l’assenza di ordini. Compila il piano per la prossima sveglia. Rispetta universo e limiti del conto.",
   challenge: "Sei il revisore indipendente e severo. Cerca prove contrarie e formula quattro domande specifiche su momento, invalidazione, quantità e scenario avverso per l’ordine immutabile.",
   answer: "Sei il decisore. Rispondi alle quattro obiezioni. Conferma integralmente l’ordine immutabile o ritiralo. Per variarlo occorre una nuova proposta e una nuova revisione.",

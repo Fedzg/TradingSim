@@ -6,7 +6,8 @@ import { FakeAgents, reviewOrder, type Agents, type Decision, type Role } from "
 import { FakeBroker, FakeMcp, type Position, type Proposal } from "../src/broker";
 import { enqueue, FakeChannel, flush, type Message } from "../src/chat";
 import type { Mcp } from "../src/mcp";
-import { Market } from "../src/market";
+import { Market, type Article, type News } from "../src/market";
+import { queueNewsSignals } from "../src/news-signals";
 import { ticketFor } from "../src/risk";
 import { run } from "../src/run";
 import { State } from "../src/state";
@@ -182,6 +183,57 @@ test("Telegram riprende dalla parte rimasta in coda dopo un limite di invio", as
   expect(sent[1].text).toStartWith("TradingSim · Resoconto (2/2)");
   expect(sent.every(message => message.text.length <= 4096)).toBe(true);
   expect((await f.messages())[0]?.delivered).toBeDefined();
+});
+
+test("le novità operative arrivano una sola volta, con simboli ammessi e fonti originali", async () => {
+  const f = await fixture();
+  const article = (slug: string, title: string, symbols: string[], minutes: number): Article => ({
+    title, link: `https://example.com/${slug}`, source: "Fonte di prova",
+    published: new Date(+now - minutes * 60_000).toISOString(), symbols, summary: "Scenario sintetico.",
+  });
+  const feed: News = { checked: now.toISOString(), lastSuccess: now.toISOString(), articles: [
+    article("earnings", "NVIDIA aggiorna la guidance", ["NVDA"], 5),
+    article("fx", "Dollaro in rialzo", ["GBP/USD"], 7),
+    article("macro", "CPI mensile sopra le attese", [], 8),
+    article("old", "Risultati Apple", ["AAPL"], 40),
+  ] };
+  let scans = 0;
+  const agents: Agents = { async invoke(role, input) {
+    expect(role).toBe("newsSignals");
+    const { candidates } = input as { candidates: { articleId: number; allowedSymbols: string[] }[] };
+    expect(candidates.map(x => x.allowedSymbols)).toEqual([["NVDA"], ["SPY", "QQQ", "IWM", "GLD", "TLT"]]);
+    scans++;
+    return { signals: [
+      { articleId: 1, symbols: ["NVDA", "TSLA"], reason: "Cambia il quadro dei ricavi attesi." },
+      { articleId: 2, symbols: ["SPY"], reason: "Dato rilevante per le aspettative sui tassi." },
+      { articleId: 3, symbols: ["AAPL"], reason: "Articolo inesistente." },
+    ] };
+  } };
+  expect(await queueNewsSignals(f.state, agents, feed, now, x => x)).toBe(2);
+  expect(await queueNewsSignals(f.state, agents, feed, new Date(+now + 5 * 60_000), x => x)).toBe(0);
+  expect(scans).toBe(1);
+  const messages = (await f.messages()).filter(message => message?.kind === "notizia-operativa");
+  const nvidia = messages.find(message => message?.text.includes("NVIDIA"));
+  expect(nvidia?.text).toContain("Strumenti Paper da valutare: NVDA.");
+  expect(nvidia?.text).toContain("https://example.com/earnings");
+  expect(nvidia?.text).not.toContain("TSLA");
+  expect(await f.broker.orders()).toEqual([]);
+});
+
+test("un errore di Codex lascia una notizia valida per il controllo seguente", async () => {
+  const f = await fixture();
+  const article: Article = {
+    title: "Microsoft pubblica una previsione aggiornata",
+    source: "Fonte di prova", link: "https://example.com/microsoft",
+    symbols: ["MSFT"], summary: "Scenario sintetico.", published: new Date(+now - 29 * 60_000).toISOString(),
+  };
+  const feed: News = { checked: now.toISOString(), lastSuccess: now.toISOString(), articles: [article] };
+  await expect(queueNewsSignals(f.state, { async invoke() { throw new Error("Codex indisponibile"); } }, feed, now, x => x))
+    .rejects.toThrow("Codex indisponibile");
+  expect(await f.messages()).toHaveLength(0);
+  expect(await queueNewsSignals(f.state, { async invoke() {
+    return { signals: [{ articleId: 1, symbols: ["MSFT"], reason: "Previsioni aziendali riviste." }] };
+  } }, feed, new Date(+now + 5 * 60_000), x => x)).toBe(1);
 });
 
 test("mercato chiuso blocca anche gli stop; fuso Roma con e senza ora legale", async () => {

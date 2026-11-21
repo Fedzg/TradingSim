@@ -98,7 +98,9 @@ docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker te
 
 Ricrea il worker con `docker compose -p tradingsim -f deploy/compose.yaml up -d --no-build`
 per caricare la configurazione. Le notifiche Paper in coda vengono ritentate
-dal worker. Le notizie vengono selezionate durante le sveglie e gli stati
-degli ordini vengono notificati quando osservati dal broker. I resoconti
+dal worker. Durante il monitoraggio delle notizie, le novità che potrebbero
+incidere su strumenti Paper vengono analizzate da Codex e possono produrre un
+avviso prima della prossima sveglia. Questo controllo non invia ordini.
+Gli stati degli ordini vengono notificati quando osservati dal broker. I resoconti
 lunghi arrivano in più messaggi numerati. Se Telegram accetta un invio ma
 la risposta si perde, il ritentativo può produrre un duplicato.

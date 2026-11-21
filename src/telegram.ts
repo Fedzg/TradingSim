@@ -4,6 +4,7 @@ const titles = {
   resoconto: "Resoconto",
   mercato: "Mercato da monitorare",
   notizia: "Notizia rilevante",
+  "notizia-operativa": "Notizia con possibile impatto Paper",
   ordine: "Aggiornamento ordine Paper",
   allarmi: "Allarmi",
 };

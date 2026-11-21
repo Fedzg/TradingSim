@@ -5,6 +5,7 @@ import { CodexAgents, FakeAgents } from "./agents";
 import { enqueue, FakeChannel, flush, UnavailableChat, type Message } from "./chat";
 import { AlpacaStdio } from "./mcp";
 import { Market } from "./market";
+import { queueNewsSignals } from "./news-signals";
 import { run } from "./run";
 import { State } from "./state";
 import { TelegramChannel } from "./telegram";
@@ -85,12 +86,15 @@ async function schedule() {
   let lastLaunch = "";
   let active: ReturnType<typeof child> | undefined;
   const jobs = new Set<ReturnType<typeof child>>();
+  let stopping = false;
   function background(lock: string, command: string) {
     const proc = child(lock, command, mode);
     jobs.add(proc);
-    void proc.exited.then(() => jobs.delete(proc));
+    void proc.exited.then(() => {
+      jobs.delete(proc);
+      if (command === "_news" && !stopping) background("outbox.guard", "_flush");
+    });
   }
-  let stopping = false;
   let wakeUp: (() => void) | undefined;
   const stop = () => {
     stopping = true;
@@ -123,7 +127,6 @@ async function schedule() {
       if (+now - lastChecked >= interval) {
         lastChecked = +now;
         background("news.guard", "_news");
-        background("outbox.guard", "_flush");
       }
     } catch (error) { console.error(opts.redact(`Scheduler: ${String(error)}`)); }
     if (!stopping) await new Promise<void>(resolve => {
@@ -168,6 +171,14 @@ try {
           opts.redact(`⚠ ${news.error} Ultimo aggiornamento: ${news.lastSuccess ?? "assente"}.`));
       }
       console.log(`Monitor notizie: ${news.error ?? `${news.articles.length} articoli in cache`}; ultimo aggiornamento ${news.lastSuccess ?? "assente"}.`);
+      if (telegram && !news.error) {
+        try {
+          const queued = await queueNewsSignals(state, new CodexAgents(opts.redact), news, now, opts.redact);
+          console.log(`Notizie con possibile impatto Paper: ${queued} avvisi in coda.`);
+        } catch (error) {
+          console.error(opts.redact(`Analisi notizie operative non riuscita: ${String(error)}`));
+        }
+      }
       break;
     }
     case "_flush": await flush(state, channel); break;
