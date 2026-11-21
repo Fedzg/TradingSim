@@ -14,7 +14,8 @@ const obj = (properties: Record<string, Schema>): Schema => ({
 const choice = (...values: string[]) => ({ ...s, enum: values });
 const proposal = obj({ symbol: s, side: choice("buy", "sell"), qty, reason: s });
 const schemas = {
-  charts: obj({ ideas: arr(obj({ symbol: s, horizon: s, direction: s, evidence: s, invalidation: s, uncertainty: s })), limitations: arr(s) }),
+  charts: obj({ ideas: arr(obj({ symbol: s, horizon: choice("15 minuti", "giornaliero"),
+    bias: choice("rialzista", "ribassista", "laterale"), direction: s, evidence: s, invalidation: s, uncertainty: s })), limitations: arr(s) }),
   news: obj({ events: arr(obj({ title: s, source: s, link: s, published: s, symbols: arr(s), impact: s, classification: choice("fatto", "indiscrezione", "interpretazione") })),
     limitations: arr(s), newMarkets: arr(obj({ name: s, symbol: s, event: s, link: s, source: s, published: s, reason: s })) }),
   newsSignals: obj({ signals: arr(obj({ articleId: qty, symbols: arr(s), reason: s })) }),
@@ -25,7 +26,8 @@ const schemas = {
 } satisfies Record<string, Schema>;
 export type Role = keyof typeof schemas;
 export type Decision = { orders: Proposal[]; reasoning: string; planNext: string };
-export type Charts = { ideas: { symbol: string; horizon: string; direction: string; evidence: string; invalidation: string; uncertainty: string }[]; limitations: string[] };
+export type Charts = { ideas: { symbol: string; horizon: "15 minuti" | "giornaliero"; bias: "rialzista" | "ribassista" | "laterale";
+  direction: string; evidence: string; invalidation: string; uncertainty: string }[]; limitations: string[] };
 export type NewsAnalysis = { events: { title: string; source: string; link: string; published: string; symbols: string[]; impact: string; classification: string }[];
   limitations: string[]; newMarkets: { name: string; symbol: string; event: string; link: string; source: string; published: string; reason: string }[] };
 export type NewsSignals = { signals: { articleId: number; symbols: string[]; reason: string }[] };
@@ -33,7 +35,7 @@ type Review = { verdict: "approve" | "reject"; reason: string };
 export type Approval = { ticket: string; review: Review };
 
 const instructions: Record<Role, string> = {
-  charts: "Sei l’analista dei grafici. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Segnala ritardi, dati insufficienti e invalidazione esplicita. Analizza anche gli strumenti solo in monitoraggio.",
+  charts: "Sei l’analista dei grafici. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Per ogni scenario seleziona un solo intervallo e un bias: rialzista o ribassista solo con evidenza nei dati; usa laterale quando il quadro è indeciso. Indica il motivo tecnico, un livello di invalidazione e le principali incertezze. Segnala ritardi e dati insufficienti. Evita probabilità numeriche e raccomandazioni. Analizza anche gli strumenti solo in monitoraggio.",
   news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Segnala dati vecchi, lacune ed eventuali nuovi mercati motivati.",
   newsSignals: "Seleziona al massimo tre notizie che potrebbero cambiare materialmente la valutazione di un ordine simulato. Cerca fatti specifici e nuovi come risultati, guidance, eventi regolatori, decisioni delle banche centrali o dati macro a sorpresa. Scarta indiscrezioni, commenti, resoconti del movimento del prezzo e collegamenti generici ai ticker. Usa solo gli articleId e i simboli consentiti dell’articolo. Spiega in una frase il nesso con gli strumenti selezionati e l’eventuale incertezza. Non suggerire ordini. Restituisci signals vuoto se nessuna notizia supera questa soglia.",
   decide: "Sei il decisore. Proponi al massimo cinque ordini in azioni intere o nessun ordine. Motiva in 3–5 frasi anche l’assenza di ordini. Compila il piano per la prossima sveglia. Rispetta universo e limiti del conto.",
@@ -99,7 +101,7 @@ export class FakeAgents implements Agents {
   async invoke(role: Role, input?: unknown) {
     const reply = { timing: "Trend ora stabile.", invalidation: "Rottura del supporto.", sizing: "Quantità ridotta.", downside: "Monitorare lo stop." };
     switch (role) {
-      case "charts": return { ideas: ["SPY", "USOIL", "GBP/USD"].map(symbol => ({ symbol, horizon: "Giornaliero", direction: "Laterale", evidence: "Candele finte", invalidation: "Rottura del range", uncertainty: "Alta" })), limitations: [] };
+      case "charts": return { ideas: ["SPY", "USOIL", "GBP/USD"].map(symbol => ({ symbol, horizon: "giornaliero", bias: "laterale", direction: "Laterale", evidence: "Candele finte", invalidation: "Rottura del range", uncertainty: "Alta" })), limitations: [] };
       case "news": {
         const articles = (input as { news?: News } | undefined)?.news?.articles ?? [];
         return { events: articles.map(article => ({ title: article.title, source: article.source, link: article.link,

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { State } from "./state";
 
-type Kind = "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "ordine" | "allarmi";
+type Kind = "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "scenario-grafici" | "ordine" | "allarmi";
 export type Message = {
   id: string;
   text: string;

@@ -1,7 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { config } from "./config";
 import { Alpaca, FakeBroker } from "./broker";
-import { CodexAgents, FakeAgents } from "./agents";
+import { ask, CodexAgents, FakeAgents, type Charts } from "./agents";
+import { chartScenarios } from "./chart-scenarios";
 import { enqueue, FakeChannel, flush, UnavailableChat, type Message } from "./chat";
 import { AlpacaStdio } from "./mcp";
 import { Market } from "./market";
@@ -158,6 +159,18 @@ try {
       await telegram.send({ id: "telegram-check", text: "Connessione Telegram riuscita. Questo è un messaggio di prova." }, async () => {});
       console.log("Messaggio di prova Telegram inviato.");
       break;
+    case "chart-report": {
+      if (!telegram) throw new Error("Configura Telegram per il resoconto dei grafici.");
+      const now = new Date();
+      const charts = await market.charts(now);
+      const analysis = await ask<Charts>(new CodexAgents(opts.redact), "charts", { now, charts });
+      const scenarios = chartScenarios(analysis, charts, now)
+        ?? "Nessuno scenario direzionale con dati sufficienti nell’ultimo controllo.";
+      const { date, time } = rome(now);
+      await enqueue(state, `${date}-${time.replace(":", "")}-grafici`, "scenario-grafici", opts.redact(scenarios));
+      process.exitCode = exitStatus(await child("outbox.guard", "_flush", mode).exited);
+      break;
+    }
     case "deliver": process.exitCode = exitStatus(await child("outbox.guard", "_flush", mode).exited); break;
     case "schedule": await supervise(); break;
     case "_schedule": await schedule(); break;
@@ -188,7 +201,7 @@ try {
         wake(scheduledDate, rawSlot as Slot), force);
       break;
     }
-    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check, telegram-check.");
+    default: throw new Error("Comandi disponibili: once, schedule, status, deliver, account-check, telegram-check, chart-report.");
   }
 } catch (error) {
   console.error(opts.redact(String(error)));

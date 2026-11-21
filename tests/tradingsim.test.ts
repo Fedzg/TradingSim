@@ -2,11 +2,12 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FakeAgents, reviewOrder, type Agents, type Decision, type Role } from "../src/agents";
+import { FakeAgents, reviewOrder, type Agents, type Charts, type Decision, type Role } from "../src/agents";
 import { FakeBroker, FakeMcp, type Position, type Proposal } from "../src/broker";
 import { enqueue, FakeChannel, flush, type Message } from "../src/chat";
+import { chartScenarios } from "../src/chart-scenarios";
 import type { Mcp } from "../src/mcp";
-import { Market, type Article, type News } from "../src/market";
+import { fakeCharts, Market, type Article, type News } from "../src/market";
 import { queueNewsSignals } from "../src/news-signals";
 import { ticketFor } from "../src/risk";
 import { run } from "../src/run";
@@ -234,6 +235,45 @@ test("un errore di Codex lascia una notizia valida per il controllo seguente", a
   expect(await queueNewsSignals(f.state, { async invoke() {
     return { signals: [{ articleId: 1, symbols: ["MSFT"], reason: "Previsioni aziendali riviste." }] };
   } }, feed, new Date(+now + 5 * 60_000), x => x)).toBe(1);
+});
+
+test("gli scenari grafici indicano il motivo e richiedono candele recenti per l’intervallo analizzato", () => {
+  const idea: Charts["ideas"][number] = {
+    symbol: "SPY", horizon: "giornaliero", bias: "rialzista", direction: "Recupero",
+    evidence: "Chiusura sopra la media mobile", invalidation: "Chiusura sotto 99", uncertainty: "Volumi bassi",
+  };
+  const charts = fakeCharts(now);
+  charts.find(series => series.symbol === "NVDA")!.intervals["15Min"] = [];
+  charts.find(series => series.symbol === "AAPL")!.intervals["1Day"] = fakeCharts(new Date(+now - 5 * 86_400_000))[0].intervals["1Day"];
+  const report = chartScenarios({ limitations: [], ideas: [
+    idea,
+    { ...idea, symbol: "GBP/USD", bias: "ribassista", horizon: "15 minuti" },
+    { ...idea, symbol: "QQQ", bias: "laterale" },
+    { ...idea, symbol: "NVDA", horizon: "15 minuti" },
+    { ...idea, symbol: "AAPL" },
+  ] }, charts, now);
+  expect(report).toContain("↑ Possibile rialzo — SPY (giornaliero)");
+  expect(report).toContain("↓ Possibile ribasso — GBP/USD (15 minuti) · solo monitoraggio");
+  expect(report).toContain("Motivo: Chiusura sopra la media mobile");
+  expect(report).toContain("Invalidazione: Chiusura sotto 99");
+  expect(report).not.toMatch(/QQQ|NVDA|AAPL/);
+});
+
+test("una sveglia produce un solo avviso sui grafici anche con force", async () => {
+  const fake = new FakeAgents();
+  const f = await fixture({ async invoke(role, input) {
+    if (role === "charts") return { limitations: [], ideas: [{
+      symbol: "SPY", horizon: "giornaliero", bias: "ribassista", direction: "Debolezza",
+      evidence: "Massimi decrescenti", invalidation: "Chiusura sopra 101", uncertainty: "Campione di prova",
+    }] };
+    return fake.invoke(role, input);
+  } });
+  await f.start(wake(date, "09:00"));
+  await f.start(wake(date, "09:00"), true);
+  const messages = (await f.messages()).filter(message => message?.kind === "scenario-grafici");
+  expect(messages).toHaveLength(1);
+  expect(messages[0]?.text).toContain("Massimi decrescenti");
+  expect(await f.broker.orders()).toEqual([]);
 });
 
 test("mercato chiuso blocca anche gli stop; fuso Roma con e senza ora legale", async () => {

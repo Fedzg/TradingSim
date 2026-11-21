@@ -104,3 +104,12 @@ avviso prima della prossima sveglia. Questo controllo non invia ordini.
 Gli stati degli ordini vengono notificati quando osservati dal broker. I resoconti
 lunghi arrivano in più messaggi numerati. Se Telegram accetta un invio ma
 la risposta si perde, il ritentativo può produrre un duplicato.
+
+Alle sveglie lo scenario sui grafici viene inviato separatamente se l’analisi
+individua una direzione con dati sufficienti. Il messaggio riporta intervallo,
+ragione, invalidazione e data dell’ultima candela disponibile. Per richiedere
+subito la stessa analisi di mercato, usa il comando di sola lettura:
+
+```sh
+docker compose -p tradingsim -f deploy/compose.yaml exec worker bun src/cli.ts chart-report
+```

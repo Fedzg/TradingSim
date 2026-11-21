@@ -1,5 +1,6 @@
 import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAnalysis } from "./agents";
 import { FakeBroker, type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
+import { chartScenarios } from "./chart-scenarios";
 import { enqueue } from "./chat";
 import { miniChart, type Market, type News, type Series } from "./market";
 import { limitFor, risk, stops, terminal, ticketFor, trading } from "./risk";
@@ -196,8 +197,9 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
       JSON.stringify([idea.symbol.toUpperCase(), source.link, source.published]));
   }
 
+  const analysisCharts = chartAnalysis && { ...chartAnalysis, ideas: chartAnalysis.ideas.map(({ bias: _bias, ...idea }) => idea) };
   const context = { entry, account: snapshot?.account, positions: snapshot?.positions, recentOrders: snapshot?.orders.slice(0, 30),
-    clock: snapshot?.clock, plan: previous?.planNext, pending: [...pending], analysisCharts: chartAnalysis, analysisNews: newsAnalysis, universe };
+    clock: snapshot?.clock, plan: previous?.planNext, pending: [...pending], analysisCharts, analysisNews: newsAnalysis, universe };
   if (snapshot && chartAnalysis && newsAnalysis) {
     try { decision = await ask<Decision>(agents, "decide", context); }
     catch (error) { alerts.push(`Decisione mancante: ${errorText(error)}`); }
@@ -254,6 +256,8 @@ export async function run({ state, broker, agents, market, redact }: Inputs, ent
   await state.write(`history/${event}`, baton);
   await state.write(`logs/${event}`, { run: entry.id, report: baton.report, alerts: alerts.map(redact) });
   await enqueue(state, entry.id, "resoconto", baton.report);
+  const scenarios = chartAnalysis && chartScenarios(chartAnalysis, charts, now);
+  if (scenarios) await enqueue(state, entry.id, "scenario-grafici", redact(scenarios), entry.id);
   if (alerts.length) await enqueue(state, entry.id, "allarmi", redact(`⚠ ${alerts.join("\n⚠ ")}`));
   if (!previous || previous.wake.id <= entry.id) await state.write("baton.json", baton);
   await state.remove("run.lock");
