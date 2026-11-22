@@ -102,10 +102,12 @@ test("G3: timeout MCP reale con richiesta persa e con risposta persa", async () 
     const upstream = fault.endsWith("-upstream");
     const accepted = fault.startsWith("accepted");
     const receipt = await f.state.read<{ name: string; at: number }>("upstream-timeout.json");
+    // The fixture timestamps receipt, after the client has already started its timer.
+    const toleranceMs = 100;
     if (upstream) {
       expect(receipt?.name).toBe("TimeoutError");
-      expect(receipt!.at - send.at).toBeGreaterThanOrEqual(30_000);
-    } else expect(delta).toBeGreaterThanOrEqual(35_000);
+      expect(receipt!.at - send.at).toBeGreaterThanOrEqual(30_000 - toleranceMs);
+    } else expect(delta).toBeGreaterThanOrEqual(35_000 - toleranceMs);
     expect(lookup.args.client_order_id).toBe(send.args.client_order_id);
     expect(first.code).toBe(0);
     expect(first.out).toContain(upstream ? "place_stock_order ha restituito un errore" : "timeout tools/call");

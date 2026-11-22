@@ -13,7 +13,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     continue;
   }
   const { name, arguments: args } = params;
-  await Bun.write(state.path(`wire-${id}.json`), JSON.stringify({ name, args, at: Date.now() }));
+  await Bun.write(state.path(`wire-${id}.json`), JSON.stringify({ name, args, at: performance.now() }));
   if (name === "place_stock_order" && fault) {
     if (fault.startsWith("accepted")) await fake.call(name, args);
     if (!fault.endsWith("-upstream")) continue; // Scade il timer del client MCP.
@@ -24,7 +24,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       throw new Error("Il broker di prova non doveva rispondere.");
     } catch (error) {
       if (!(error instanceof DOMException) || error.name !== "TimeoutError") throw error;
-      await state.write("upstream-timeout.json", { name: error.name, at: Date.now() });
+      await state.write("upstream-timeout.json", { name: error.name, at: performance.now() });
       console.log(JSON.stringify({ jsonrpc: "2.0", id, result: {
         structuredContent: { _alpaca_mcp_security: {}, data: { error: { timeout: true } } },
       } }));
