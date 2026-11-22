@@ -10,17 +10,14 @@ import { OrderRejected } from "./mcp";
 import { miniChart, type Market, type News, type Series } from "./market";
 import { limitFor, risk, stops, terminal, ticketFor, trading } from "./risk";
 import { type Baton, type RunLock, State } from "./state";
+import { orderStatus, wakeReport } from "./wake-report";
 import { missed, nextWake, type Wake } from "./time";
 
 type Inputs = { state: State; broker: Broker; agents: Agents; market: Market; redact: (s: string) => string };
 
 function observed(order: BrokerOrder, brokerLabel: string) {
   const filled = Number(order.filled_qty);
-  const status = new Map([
-    ["new", "nuovo"], ["accepted", "accettato"], ["pending_new", "in attesa di accettazione"], ["filled", "eseguito"],
-    ["partially_filled", "eseguito in parte"], ["canceled", "annullato"], ["rejected", "respinto"], ["expired", "scaduto"],
-    ["done_for_day", "terminato per oggi"], ["pending_cancel", "annullamento in corso"], ["replaced", "sostituito"],
-  ]).get(order.status) ?? `stato ${order.status}`;
+  const status = orderStatus(order.status);
   return `${order.client_order_id}: ${status} (${brokerLabel}), eseguite ${Number.isFinite(filled) ? filled : "quantità non verificabile"}/${order.qty}.`;
 }
 
@@ -40,6 +37,9 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   const simulated = broker instanceof FakeBroker;
   const brokerLabel = simulated ? "broker finto" : "Alpaca Paper";
   const lines: string[] = simulated ? ["SIMULAZIONE OFFLINE. Dati, ordini e consegne finti."] : [];
+  const reasons: string[] = [];
+  const explain = (reason: string) => { reasons.push(reason); note(reason); };
+  const reportIssue = (reason: string) => { reasons.push(reason); alerts.push(reason); };
   const pending = new Set<string>();
   const unresolved = new Set<string>();
   const uncertainSymbols = new Set<string>();
@@ -96,19 +96,24 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   let chartAnalysis: Charts | undefined;
   let newsAnalysis: NewsAnalysis | undefined;
   let decision: Decision | undefined;
+  let ordersVerified = false;
+  let newsError: string | undefined;
 
   async function execute(order: Proposal, limit: number | null, approvalTicket?: string, mandatory = false) {
     const label = `${order.symbol} ${order.side} × ${order.qty}`;
-    const reject = (reason: string) => note(`Respinto ${label}: ${reason}`);
+    const reject = (reason: string) => explain(`Respinto ${label}: ${reason}`);
     const id = `${entry.id}-${order.symbol}-${order.side}`;
     if (!universe.some(symbol => symbol === order.symbol)) return reject("Simbolo fuori dall’universo operativo Alpaca Paper.");
     if (!mandatory && approvalTicket !== ticketFor(order, limit)) return reject("Condizioni diverse da quelle approvate. Serve una nuova revisione.");
-    if (pending.has(id) || intents.some(item => item.id === id)) return note(`Nessun reinvio per ${id}: intento già registrato.`);
+    if (pending.has(id) || intents.some(item => item.id === id)) return explain(`Nessun reinvio per ${id}: intento già registrato.`);
     if (recoveredSides.has(`${order.symbol}/${order.side}`)) return reject("Ordine della sveglia interrotta appena riconciliato.");
     if (uncertainSymbols.has(order.symbol) || (order.side === "buy" && unresolved.size)) return reject("Invio precedente ancora da riconciliare.");
     try {
       const already = await broker.find(id);
-      if (already) return note(observed(already, brokerLabel));
+      if (already) {
+        confirmed.set(id, already);
+        return explain(`${label}: Alpaca aveva già registrato l’ordine ${id}.`);
+      }
       const current = await broker.snapshot();
       const visible = new Set(current.orders.map(item => item.client_order_id));
       for (const [knownId, item] of confirmed) {
@@ -127,6 +132,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       if (!await broker.tradable(order.symbol)) return reject("Titolo non negoziabile su Alpaca Paper.");
     } catch (error) {
       alerts.push(`Verifica broker prima di ${id}: ${errorText(error)}`);
+      reasons.push(errorText(error));
       return reject("Impossibile verificare il broker prima dell’invio.");
     }
 
@@ -155,7 +161,9 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   }
 
   try { snapshot = await broker.snapshot(); }
-  catch (error) { alerts.push(`Conto, posizioni, ordini e orologio non verificati: ${errorText(error)}`); }
+  catch (error) {
+    reportIssue(`Conto, posizioni, ordini e orologio non verificati: ${errorText(error)}`);
+  }
 
   if (snapshot && trading(entry, snapshot)) {
     for (const order of stops(snapshot)) {
@@ -170,9 +178,13 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     news = await market.cachedNews(state);
     if (!news.checked) news = await measureFeed("news", () => market.poll(state, now));
     if (news.error || !news.lastSuccess || +now - Date.parse(news.lastSuccess) > 30 * 60_000) {
-      alerts.push(`${news.error ?? "Cache notizie non recente."} Ultimo aggiornamento: ${news.lastSuccess ?? "assente"}.`);
+      newsError = `${news.error ?? "Cache notizie non recente."} Ultimo aggiornamento: ${news.lastSuccess ?? "assente"}.`;
+      alerts.push(newsError);
     }
-  } catch (error) { alerts.push(`Notizie indisponibili: ${errorText(error)}`); }
+  } catch (error) {
+    newsError = `Notizie indisponibili: ${errorText(error)}`;
+    alerts.push(newsError);
+  }
 
   const monitored = [...new Set([...watched, ...charts.map(series => series.symbol)])];
   const newsInput = news && {
@@ -187,9 +199,15 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     ask<NewsAnalysis>(agents, "news", { now, news: newsInput, watched: monitored }),
   ]);
   if (analysts[0].status === "fulfilled") chartAnalysis = analysts[0].value;
-  else alerts.push(`Analisi grafici mancante: ${errorText(analysts[0].reason)}`);
+  else {
+    reportIssue(`Analisi grafici mancante: ${errorText(analysts[0].reason)}`);
+  }
   if (analysts[1].status === "fulfilled") newsAnalysis = analysts[1].value;
-  else alerts.push(`Analisi notizie mancante: ${errorText(analysts[1].reason)}`);
+  else {
+    const message = `Analisi notizie mancante: ${errorText(analysts[1].reason)}`;
+    newsError = [message, newsError].filter(Boolean).join(" ");
+    reportIssue(message);
+  }
 
   for (const [index, series] of charts.entries()) {
     if (series.source === "Alpaca IEX") {
@@ -224,12 +242,12 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   }
   for (const item of chartAnalysis?.limitations ?? []) note(item);
   for (const item of newsAnalysis?.limitations ?? []) note(item);
-  for (const event of newsAnalysis?.events ?? []) {
-    if (news?.articles.some(article => article.link === event.link && article.published === event.published && article.source === event.source)) {
-      const summary = `${event.classification}: ${event.title} (${event.symbols.join(", ")}). ${event.impact} — ${event.source}, ${event.published}, ${event.link}`;
-      note(summary);
-      await enqueue(state, entry.id, "notizia", redact(summary), JSON.stringify([event.link, event.published]));
-    }
+  const verifiedEvents = (newsAnalysis?.events ?? []).filter(event =>
+    news?.articles.some(article => article.link === event.link && article.published === event.published && article.source === event.source));
+  for (const event of verifiedEvents) {
+    const summary = `${event.classification}: ${event.title} (${event.symbols.join(", ")}). ${event.impact} — ${event.source}, ${event.published}, ${event.link}`;
+    note(summary);
+    await enqueue(state, entry.id, "notizia", redact(summary), JSON.stringify([event.link, event.published]));
   }
   const analysisCharts = chartAnalysis && { ...chartAnalysis, ideas: chartAnalysis.ideas.filter(idea => watched.includes(idea.symbol)).map(({ bias: _bias, ...idea }) => idea) };
   const analysisNews = newsAnalysis && { ...newsAnalysis, newMarkets: [],
@@ -238,7 +256,9 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     clock: snapshot?.clock, plan: previous?.planNext, pending: [...pending], analysisCharts, analysisNews, universe };
   if (snapshot && chartAnalysis && newsAnalysis) {
     try { decision = await ask<Decision>(agents, "decide", context); }
-    catch (error) { alerts.push(`Decisione mancante: ${errorText(error)}`); }
+    catch (error) {
+      reportIssue(`Decisione mancante: ${errorText(error)}`);
+    }
   }
 
   if (snapshot && decision) {
@@ -247,7 +267,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       const limit = limitFor(order, charts, now);
       const issue = risk(order, limit, snapshot, entry);
       if (issue || i >= 5) {
-        note(`Respinto ${order.symbol} ${order.side}: ${issue ?? "Oltre cinque proposte nella stessa sveglia."}`);
+        explain(`Respinto ${order.symbol} ${order.side}: ${issue ?? "Oltre cinque proposte nella stessa sveglia."}`);
         continue;
       }
       try {
@@ -255,19 +275,19 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
           charts.find(series => series.symbol === order.symbol), chartAnalysis, newsAnalysis, now);
         const approval = await reviewOrder(agents, ticketFor(order, limit), pertinent);
         if (approval.review.verdict !== "approve") {
-          note(`Respinto dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
+          explain(`Respinto dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
           continue;
         }
         note(`Approvato dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
         await execute(order, limit, approval.ticket);
       } catch (error) {
-        alerts.push(`Revisione o esecuzione non completata per ${order.symbol}: ${errorText(error)}`);
+        reportIssue(`Revisione o esecuzione non completata per ${order.symbol}: ${errorText(error)}`);
         note(`Ordine ${order.symbol} ${order.side} non confermato. Vedi l’allarme e il registro degli intenti.`);
       }
     }
   }
   if (snapshot) {
-    try { snapshot = await broker.snapshot(); }
+    try { snapshot = await broker.snapshot(); ordersVerified = true; }
     catch (error) { alerts.push(`Dati finali del conto indisponibili: ${errorText(error)}. Riporto lo snapshot iniziale.`); }
     note(`Conto: USD ${snapshot.account.equity}. P&L del giorno: USD ${(Number(snapshot.account.equity) - Number(snapshot.account.last_equity)).toFixed(2)}. Orologio (${brokerLabel}): ${snapshot.clock.timestamp}.`);
     for (const order of snapshot.orders.filter(x => lock.intents.includes(x.client_order_id))) {
@@ -295,7 +315,26 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   const event = `${entry.id}-${crypto.randomUUID()}.json`;
   await state.write(`history/${event}`, baton);
   await state.write(`logs/${event}`, { run: entry.id, report: baton.report, alerts: alerts.map(redact) });
-  await enqueue(state, entry.id, "resoconto", baton.report);
+  let active = ordersVerified ? snapshot?.openOrders ?? snapshot?.orders : undefined;
+  let activeError: string | undefined;
+  if (!active) {
+    try { active = await broker.readOpenOrders(); }
+    catch (error) { activeError = errorText(error); }
+  }
+  const paperEvents = [...new Map(verifiedEvents.filter(item => /^https:\/\//i.test(item.link))
+    .map(item => ({ ...item, symbols: universe.filter(symbol => item.symbols.includes(symbol)) }))
+    .filter(item => item.symbols.length > 0).map(item => [item.link, item])).values()];
+  const outcomes = intents.filter(intent => intent.id.startsWith(entry.id + "-")).map(intent => ({
+    intent,
+    observed: (ordersVerified ? snapshot?.orders.find(order => order.client_order_id === intent.id) : undefined)
+      ?? confirmed.get(intent.id) ?? intent.observed,
+  }));
+  if (entry.slot === "09:00") reasons.unshift("Briefing programmato, senza operazioni.");
+  else if (snapshot?.clock.is_open === false) reasons.unshift("Alpaca indica mercato chiuso.");
+  if (decision && !decision.orders.length) reasons.push(decision.reasoning);
+  const report = wakeReport({ entry, simulated, outcomes, reasons, active, activeError,
+    events: newsError ? [] : paperEvents, newsError, charts: chartAnalysis?.ideas ?? [] });
+  await enqueue(state, entry.id, "resoconto", redact(report), entry.id, "wake-report");
   const scenarios = chartAnalysis && chartScenarios(chartAnalysis, charts, now);
   if (scenarios) await enqueue(state, entry.id, "scenario-grafici", redact(scenarios), entry.id);
   if (alerts.length) await enqueue(state, entry.id, "allarmi", redact(`⚠ ${alerts.join("\n⚠ ")}`));

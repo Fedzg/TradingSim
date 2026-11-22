@@ -49,6 +49,7 @@ export async function notificationSelector(state: State, redact: (text: string) 
   return async (message: Message) => {
     if (message.kind === "watchlist" && message.notification === "watchlist-addition" && additionIds.has(message.id) &&
         message.text.includes("Aggiunto alla watchlist. Solo monitoraggio.")) return message;
+    if (message.kind === "resoconto" && message.notification === "wake-report") return message;
     if (message.kind !== "ordine") return;
     if (message.notification === "order") return message;
     // I vecchi eventi hanno stato e quantità nel testo ma non il motivo dell’intento.

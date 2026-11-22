@@ -98,12 +98,13 @@ docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker te
 ```
 
 Ricrea il worker con `docker compose -p tradingsim -f deploy/compose.yaml up -d --no-build`
-per caricare la configurazione. Telegram invia automaticamente solo gli
-aggiornamenti degli ordini Paper verificati e le aggiunte già salvate alla
-watchlist. Il controllo dello stato degli ordini tra le sveglie avviene
-circa ogni minuto. I resoconti, i briefing, le notizie e i grafici restano
-locali, anche se erano già in coda. Se Telegram accetta un invio ma la
-risposta si perde, il ritentativo può produrre un duplicato.
+per caricare la configurazione. Telegram invia un riepilogo per ogni sveglia
+in ora di Roma, anche senza operazioni, oltre agli aggiornamenti degli
+ordini Paper e alle aggiunte salvate nella watchlist. Tra le sveglie il
+worker ricontrolla gli ordini circa ogni minuto. Le notizie pertinenti
+compaiono nel riepilogo. I vecchi resoconti in coda restano locali.
+La coda ritenta la consegna senza ripetere la sveglia. Se Telegram accetta
+l’invio ma la risposta si perde, il ritentativo può produrre un duplicato.
 
 `chart-report` produce un resoconto locale senza inviare ordini o messaggi.
 

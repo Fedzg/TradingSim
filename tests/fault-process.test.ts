@@ -139,7 +139,7 @@ for (const [label, json] of [
     expect(alerts).toContain("Decisione mancante");
     expect(alerts).toMatch(label === "troncato" ? /JSON|parse|Unexpected/i : /Risposta non valida/);
     expect((await f.messages()).some(m => m?.kind === "allarmi" && m.text.includes(alerts))).toBe(true);
-    expect((await f.messages()).some(m => m?.kind === "resoconto" && m.text.includes("Decisione discrezionale non disponibile"))).toBe(true);
+    expect((await f.messages()).some(m => m?.kind === "resoconto" && m.text.includes("Decisione mancante"))).toBe(true);
     expect(await f.orders()).toEqual([]);
     console.log("G4", { label, alerts, orders: 0 });
   });
@@ -289,7 +289,7 @@ for (const [fault, detail, orderStatus] of [
     expect(baton.report).toContain(detail);
     expect(trace.split("\n").filter(line => line.startsWith("place_stock_order "))).toHaveLength(orderStatus ? 1 : 0);
     expect(orders).toHaveLength(orderStatus ? 1 : 0);
-    expect(notifications).toHaveLength(orders.length);
+    expect(notifications).toHaveLength(orders.length + 1);
     if (fault.startsWith("review-")) expect(trace).toContain("decide\nchallenge\nanswer\nreview");
     if (orderStatus) {
       expect(intents[0].observed).toMatchObject({ client_order_id: orders[0].client_order_id, status: orderStatus, filled_qty: "0" });
@@ -324,7 +324,7 @@ for (const corruption of ["troncato", "campi invalidi", "data impossibile"]) {
     expect((await f.state.intents())[0].observed?.client_order_id).toBe(intent.id);
     expect(restarted.code).toBe(0);
     expect(await f.orders()).toEqual(before);
-    expect(notifications).toHaveLength(1);
+    expect(notifications).toHaveLength(2);
   });
 }
 
@@ -342,6 +342,7 @@ test("Audit scheduler riparte alle 21:40 Roma dopo due slot saltati", async () =
   });
   try {
     await until(async () => (await f.state.baton()).baton?.wake.slot === "21:40" || undefined);
+    await until(async () => (await f.state.list("fake-chat")).find(name => name.startsWith("resoconto-")));
   } finally { scheduler.proc.kill("SIGTERM"); }
   const result = await scheduler.outcome;
   const logs = await f.state.list("history");
@@ -351,6 +352,7 @@ test("Audit scheduler riparte alle 21:40 Roma dopo due slot saltati", async () =
   expect(baton.planNext).toContain("Sveglie saltate (ora di Roma): 2026-11-20 15:40, 2026-11-20 18:30.");
   expect(logs).toHaveLength(1);
   expect(logs[0]).toStartWith("2026-11-20-2140-");
+  expect(await f.state.list("fake-chat")).toHaveLength(1);
   expect(await f.orders()).toEqual(before);
 });
 
@@ -374,7 +376,7 @@ for (const [fault, command, reason] of [
     expect(baton.planNext).toContain(reason);
     expect(trace).not.toMatch(/decide|place_stock_order/);
     expect(await f.orders()).toHaveLength(0);
-    expect(await f.state.list("fake-chat")).toHaveLength(0);
+    expect((await f.state.list("fake-chat")).filter(name => name.startsWith("resoconto-"))).toHaveLength(1);
   });
 }
 
@@ -393,7 +395,7 @@ test("Audit risposta persa e lookup indisponibile fino al riavvio", async () => 
   expect(retry.out).not.toContain("eseguite 2/2");
   expect((await f.state.intents())[0].observed).toEqual(order);
   expect(await f.orders()).toEqual([order]);
-  expect(await f.state.list("fake-chat")).toHaveLength(1);
+  expect(await f.state.list("fake-chat")).toHaveLength(2);
 });
 
 test("Audit rifiuto esplicito del broker senza ordine creato", async () => {
@@ -409,5 +411,70 @@ test("Audit rifiuto esplicito del broker senza ordine creato", async () => {
   expect(baton.report).toContain("potere di acquisto insufficiente");
   expect(baton.pending).toEqual([]);
   expect((await f.state.intents())[0].observed).toMatchObject({ status: "rejected", filled_qty: "0" });
-  expect(await f.state.list("fake-chat")).toHaveLength(1);
+  expect(await f.state.list("fake-chat")).toHaveLength(2);
+});
+
+for (const [fault, expected, notifications] of [
+  ["closed", ["Nessun ordine inviato.", "Alpaca indica mercato chiuso.", "Nessun ordine attivo."], 1],
+  ["accepted", ["SPY · Acquisto · richieste 2 · inviato · accettato, 0 eseguite", "residue 2"], 2],
+  ["wake-partial", ["eseguito in parte, acquistato: 1", "eseguite 1, residue 1"], 2],
+  ["wake-sale", ["SPY · Vendita · richieste 2 · inviato · eseguito, venduto: 2", "Riduzione dell’esposizione su SPY."], 2],
+  ["wake-buy-filled", ["inviato · eseguito, acquistato: 2", "Trend di prova.", "Grafico (giornaliero)"], 2],
+  ["news-feed", ["Notizie non verificabili.", "Feed finto indisponibile"], 1],
+  ["open", ["Ordini attivi non verificabili.", "get_orders (open)"], 1],
+  ["account-error", ["get_account_info", "QQQ · Vendita · accettato", "eseguite 1, residue 2", "stop 95"], 1],
+] as const) {
+  test(`Resoconto Telegram fake ${fault}`, async () => {
+    const f = await fixture();
+    if (fault === "closed" || fault === "news-feed") await f.state.write("fake-open.json", false);
+    if (fault === "wake-sale") await f.state.write("fake-positions.json", [
+      { symbol: "SPY", qty: "4", qty_available: "4", avg_entry_price: "100", current_price: "100", market_value: "400" },
+    ]);
+    if (fault === "account-error") await f.state.write("fake-broker.json", [
+      { client_order_id: "precedente", symbol: "QQQ", side: "sell", status: "accepted", qty: "3", filled_qty: "1", limit_price: null, stop_price: "95" },
+    ]);
+    const checked = new Date().toISOString();
+    const article = { title: "Dati macro di prova", link: "https://example.com/paper", source: "Fonte di prova",
+      published: checked, symbols: ["SPY"], summary: "Inflazione sotto le attese." };
+    await f.state.write("news.json", { checked, lastSuccess: checked,
+      ...(fault === "news-feed" ? { error: "Feed finto indisponibile", articles: [] } : { articles: [article] }) });
+    const result = await f.once("audit", { AUDIT_FAULT: fault }).outcome;
+    expect(result.code).toBe(0);
+    expect((await f.once("audit", { AUDIT_FAULT: fault }).outcome).code).toBe(0);
+    const files = await f.state.list("fake-chat");
+    expect(files).toHaveLength(notifications);
+    const [name] = files.filter(name => name.startsWith("resoconto-"));
+    const report = (await f.state.read<Message>("fake-chat/" + name))!.text;
+    const reports = (await f.messages()).filter(message => message?.kind === "resoconto");
+    expect(reports).toHaveLength(1);
+    for (const part of ["15:40 · Europe/Rome", "Esito della sveglia", "Ordini Paper attivi", "Notizie con possibile impatto Paper", ...expected]) {
+      expect(report).toContain(part);
+    }
+    if (fault === "accepted") expect(report).not.toContain("acquistato:");
+    if (fault !== "news-feed") {
+      expect(report).toContain(article.link);
+      expect(report).toContain("Dati macro di prova (SPY)");
+    }
+    if (fault === "wake-buy-filled" || fault === "closed") console.log("ESEMPIO " + fault + "\n" + report);
+  });
+}
+
+test("Resoconto Telegram fake ritenta dopo riavvio senza ripetere la sveglia", async () => {
+  const f = await fixture();
+  const first = await f.once("audit", { TRADINGSIM_FAKE_CHAT_FAIL: "1" }).outcome;
+  expect(first.code).toBe(0);
+  const original = (await f.messages()).find(message => message?.notification === "wake-report")!;
+  expect(original).toMatchObject({ attempts: 1, error: "Consegna finta non riuscita." });
+  const history = await f.state.list("history");
+  const orders = await f.orders();
+  expect(orders).toHaveLength(1);
+  expect(await f.state.list("fake-chat")).toHaveLength(0);
+  expect((await f.command(["deliver"]).outcome).code).toBe(0);
+  expect((await f.command(["deliver"]).outcome).code).toBe(0);
+  expect(await f.state.list("history")).toEqual(history);
+  expect(await f.orders()).toEqual(orders);
+  const delivered = (await f.messages()).filter(message => message?.notification === "wake-report");
+  expect(delivered).toHaveLength(1);
+  expect(delivered[0]).toMatchObject({ id: original.id, attempts: 2, delivered: expect.any(String) });
+  expect(await f.state.list("fake-chat")).toHaveLength(2);
 });

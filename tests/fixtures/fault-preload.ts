@@ -129,6 +129,14 @@ if (mode === "audit" && process.argv.includes("_run")) {
       } } } };
     }
     const result = await call.call(this, name, args);
+    if (name === "place_stock_order" && ["wake-buy-filled", "wake-partial", "wake-sale"].includes(fault ?? "")) {
+      const orders = await this.orders();
+      const order = orders.at(-1)!;
+      order.status = fault === "wake-partial" ? "partially_filled" : "filled";
+      order.filled_qty = fault === "wake-partial" ? "1" : order.qty;
+      await Bun.write(join(root, "fake-broker.json"), JSON.stringify(orders));
+      return { structuredContent: order };
+    }
     if (name === "place_stock_order" && fault === "lost") {
       placed = true;
       return { isError: true };
@@ -150,6 +158,10 @@ if (mode === "audit" && process.argv.includes("_run")) {
       globalThis.setTimeout = ((fn, ms, ...args) => timer(fn, ms === 150000 ? 75 : ms, ...args)) as typeof setTimeout;
       try { return await new CodexAgents(x => x).invoke(role, input); }
       finally { globalThis.setTimeout = timer; }
+    }
+    if (role === "decide" && fault === "wake-sale") {
+      return { orders: [{ symbol: "SPY", side: "sell", qty: 2, reason: "Riduzione dell’esposizione su SPY." }],
+        reasoning: "Il trend ha perso forza.", planNext: "Ricontrollare SPY." };
     }
     if (role === "review" && fault === "review-down") throw new Error("Revisore indisponibile");
     if (role === "review" && fault === "review-schema") return { verdict: true };

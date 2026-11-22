@@ -5,15 +5,16 @@ export type Side = "buy" | "sell";
 export type Proposal = { symbol: string; side: Side; qty: number; reason: string };
 export type BrokerOrder = {
   client_order_id: string; symbol: string; side: Side; qty: string; filled_qty: string;
-  status: string; limit_price: string | null;
+  status: string; limit_price: string | null; stop_price?: string | null;
 };
 export type Intent = { id: string; order: Proposal; limit: number | null; attemptedAt: string; submissionRejection?: string; observed?: BrokerOrder };
 export type Account = { equity: string; last_equity: string; cash: string; buying_power: string; trading_blocked: boolean };
 export type Position = { symbol: string; qty: string; qty_available: string; avg_entry_price: string; current_price: string; market_value: string };
-export type Snapshot = { account: Account; positions: Position[]; orders: BrokerOrder[]; clock: { is_open: boolean; timestamp: string } };
+export type Snapshot = { account: Account; positions: Position[]; orders: BrokerOrder[]; openOrders?: BrokerOrder[]; clock: { is_open: boolean; timestamp: string } };
 
 export interface Broker {
   snapshot(): Promise<Snapshot>;
+  readOpenOrders(): Promise<BrokerOrder[]>;
   tradable(symbol: string): Promise<boolean>;
   find(id: string): Promise<BrokerOrder | undefined>;
   submit(intent: Intent): Promise<BrokerOrder>;
@@ -23,13 +24,18 @@ function decimal(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Number(value));
 }
 
-function brokerFields({ client_order_id, symbol, side, qty, filled_qty, status, limit_price }: BrokerOrder): BrokerOrder {
+function brokerFields({ client_order_id, symbol, side, qty, filled_qty, status, limit_price, stop_price }: BrokerOrder): BrokerOrder {
   if (typeof client_order_id !== "string" || !client_order_id || typeof symbol !== "string" || !symbol ||
       (side !== "buy" && side !== "sell") || !decimal(qty) || !decimal(filled_qty) ||
       typeof status !== "string" || !status || (limit_price !== null && !decimal(limit_price))) {
     throw new Error("Alpaca MCP: risposta ordine non valida o quantità non verificabile.");
   }
-  return { client_order_id, symbol, side, qty, filled_qty, status, limit_price };
+  return { client_order_id, symbol, side, qty, filled_qty, status, limit_price, ...(decimal(stop_price) ? { stop_price } : {}) };
+}
+
+function snapshotOrder(item: BrokerOrder) {
+  try { return brokerFields(item); }
+  catch { throw new Error("Alpaca MCP: get_orders, dati ordine non verificabili."); }
 }
 
 export class Alpaca implements Broker {
@@ -50,14 +56,14 @@ export class Alpaca implements Broker {
       payload<BrokerOrder[]>(this.mcp, "get_orders", { status: "all", limit: 500, after }),
       payload<Snapshot["clock"]>(this.mcp, "get_clock"),
     ]);
-    const open = await payload<BrokerOrder[]>(this.mcp, "get_orders", { status: "open", limit: 500 });
+    const openOrders = await this.readOpenOrders();
     if (!Array.isArray(positions)) throw new Error("Alpaca MCP: get_all_positions, elenco posizioni non valido.");
     if (!Array.isArray(orders)) throw new Error("Alpaca MCP: get_orders (all), elenco ordini non valido.");
-    if (!Array.isArray(open)) throw new Error("Alpaca MCP: get_orders (open), elenco ordini non valido.");
     if (typeof clock.is_open !== "boolean" || typeof clock.timestamp !== "string" || !Number.isFinite(Date.parse(clock.timestamp))) {
       throw new Error("Alpaca MCP: get_clock, orologio non valido.");
     }
-    if (orders.length >= 500 || open.length >= 500) throw new Error("Alpaca MCP: elenco ordini potenzialmente incompleto.");
+    if (orders.length >= 500) throw new Error("Alpaca MCP: elenco ordini potenzialmente incompleto.");
+    const recentOrders = orders.map(snapshotOrder);
     return {
       account,
       positions: positions.map(position => {
@@ -67,14 +73,17 @@ export class Alpaca implements Broker {
         }
         return { symbol, qty, qty_available, avg_entry_price, current_price, market_value };
       }),
-      orders: [...new Map([...orders, ...open].map(item => {
-        try {
-          const order = brokerFields(item);
-          return [order.client_order_id, order] as const;
-        } catch { throw new Error("Alpaca MCP: get_orders, dati ordine non verificabili."); }
-      })).values()],
+      orders: [...new Map([...recentOrders, ...openOrders].map(order => [order.client_order_id, order])).values()],
+      openOrders,
       clock: { is_open: clock.is_open, timestamp: clock.timestamp },
     };
+  }
+
+  async readOpenOrders() {
+    const open = await payload<BrokerOrder[]>(this.mcp, "get_orders", { status: "open", limit: 500 });
+    if (!Array.isArray(open)) throw new Error("Alpaca MCP: get_orders (open), elenco ordini non valido.");
+    if (open.length >= 500) throw new Error("Alpaca MCP: elenco ordini aperti potenzialmente incompleto.");
+    return open.map(snapshotOrder);
   }
 
   async tradable(symbol: string) {

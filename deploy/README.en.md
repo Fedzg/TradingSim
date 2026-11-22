@@ -60,12 +60,14 @@ TELEGRAM_CHAT_ID=your-chat-id
 
 Run `docker compose -p tradingsim -f deploy/compose.yaml run --rm --no-deps worker telegram-check`
 only when you want to send a test notification. After changing the file,
-recreate the worker. Telegram automatically sends only confirmed order
-updates and saved watchlist additions. Other messages stay in the local
-outbox, including older queued reports. The worker checks order state
-between trading sessions approximately once a minute.
-`chart-report` displays and saves its report locally. If Telegram accepts a
-message and its acknowledgment is lost, a retry can repeat the message.
+recreate the worker. Telegram sends a summary for every Europe/Rome wake-up,
+even when no order is sent. Confirmed order updates and saved watchlist
+additions arrive separately. The worker checks open orders approximately
+once a minute between wake-ups. Relevant news appears in the summary.
+Older queued reports stay local. `chart-report` displays and saves its
+report locally. Delivery retries leave the wake-up and its orders alone.
+If Telegram accepts a message and its acknowledgment is lost, a retry can
+repeat the message.
 
 ## Watchlist permission and review
 

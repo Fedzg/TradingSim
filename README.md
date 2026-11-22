@@ -43,12 +43,12 @@ monitored via its underlying index only. The worker reports unavailable or
 insufficient discovery feeds. A functioning feed depends on the deployment
 network and provider access.
 
-Telegram automatically sends only confirmed Paper order updates and saved
-watchlist additions. Reports, charts, and news remain in local state, even
-when they were previously queued. If Telegram accepts a message and its
-acknowledgment is lost, delivery can still be repeated. See the
-[watchlist commands](deploy/README.en.md#watchlist-permission-and-review) to
-inspect proposals and grant permission. Logs may include Paper account data.
+Telegram sends a summary for every wake-up, even when no order is sent.
+It includes open Paper orders and up to three relevant news items.
+Confirmed order updates and saved watchlist additions still arrive
+separately. Full reports and charts remain in local state. See the
+[watchlist commands](deploy/README.en.md#watchlist-permission-and-review)
+to inspect proposals and grant permission. Logs may include Paper account data.
 
 ## Checks without orders
 

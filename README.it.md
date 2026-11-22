@@ -31,12 +31,12 @@ Un invio incerto rimane registrato e viene riconciliato per ID senza reinvio
 automatico. Se il broker non rende l'esito verificabile, controlla il registro
 `intents/` e il conto Paper prima di intervenire.
 
-Telegram invia automaticamente solo gli aggiornamenti degli ordini Paper
-confermati dal broker e le aggiunte salvate nella watchlist. Gli altri
-messaggi in coda, compresi i resoconti, le notizie e i grafici, restano
-consultabili localmente. Lo stato e il testimone sono visibili con
-`bun run status`; i resoconti si trovano in `state/history/` e i log in
-`state/logs/`.
+Telegram invia un riepilogo per sveglia anche senza operazioni, oltre agli
+aggiornamenti degli ordini Paper e alle aggiunte salvate nella watchlist.
+Il riepilogo include gli ordini attivi e fino a tre notizie pertinenti.
+I grafici completi e gli altri messaggi in coda restano consultabili
+localmente. Lo stato e il testimone sono visibili con `bun run status`,
+i resoconti completi sono in `state/history/` e i log in `state/logs/`.
 
 Le proposte per la watchlist si consultano su richiesta. L’aggiunta richiede
 prima il permesso dell’operatore e poi una revisione indipendente.
