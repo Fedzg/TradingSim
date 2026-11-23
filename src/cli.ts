@@ -6,6 +6,7 @@ import { closeCalendar, closeDue, closeReportId, dailyClose, type CloseSchedule 
 import { Discovery, savedWatchlist } from "./discovery";
 import { measureAgents, measureFeed } from "./efficiency-metrics";
 import { chartContext } from "./indicators";
+import { freeUsage } from "./provider-cache";
 import { MonitorFeeds } from "./monitor-feeds";
 import { catalog, scan } from "./discovery-sources";
 import { chartScenarios } from "./chart-scenarios";
@@ -33,7 +34,7 @@ const scheduledDate = dateIndex < 0 ? undefined : flags[dateIndex + 1];
 const opts = await config(fake);
 const state = new State(opts.root);
 const mcp = fake ? undefined : new AlpacaStdio(opts.key, opts.secret);
-const feeds = new MonitorFeeds(state,mcp);
+const feeds = new MonitorFeeds(state,mcp,command==="_run" || command==="chart-report");
 const readSeries = feeds.series.bind(feeds);
 const market = new Market(mcp, fake);
 const marketWithWatchlist = async () => {
@@ -256,6 +257,7 @@ try {
       console.log(opts.redact(JSON.stringify({ scanAt, coverage, watchlist: await savedWatchlist(state), revisioni }, null, 2)));
       break;
     }
+    case "api-usage": console.log(JSON.stringify(await freeUsage(state),null,2)); break;
     case "monitor-check": {
       if (fake) throw new Error("Usa bun test per le verifiche offline dei provider.");
       console.log(opts.redact((await buildGoldReport(state,new Date(),false)).text));

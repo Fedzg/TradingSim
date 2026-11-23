@@ -2,7 +2,7 @@ import { enqueue, outboxId } from "./chat";
 import { verifyEvents } from "./event-news";
 import type { NewsAnalysis } from "./agents";
 import { pct, rsi14 } from "./indicators";
-import { MonitorFeeds, freshness, type Quote } from "./monitor-feeds";
+import { MonitorFeeds, freshness, quoteQuality, type Quote } from "./monitor-feeds";
 import { type News, type Series } from "./market";
 import type { State } from "./state";
 import { rome } from "./time";
@@ -92,7 +92,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
     symbols: exchange ? contracts(ticker,exchange,now) : ticker ? [ticker] : [] }));
   const quotes = fake ? await state.read<Quote[]>("fake-gold-quotes.json") ?? [] :
     [];
-  const feeds = new MonitorFeeds(state);
+  const feeds = new MonitorFeeds(state,undefined,true);
   const text = [`${date} · 12:30 Europe/Rome${fake ? " · SIMULAZIONE" : ""}`];
   const next: string[] = [];
   const selected: Record<string,string> = {};
@@ -108,14 +108,10 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
         if (row.exchange) {
           const root = row.name.split(" ").at(-1)!;
           const reference = await feeds.yahooQuote(root+"=F").catch(()=>undefined);
-          const contracts = await feeds.datedContracts(row.symbols,now);
+          const contracts = await feeds.datedContracts(row.symbols,now,reference?.marketState==="CLOSED");
           q = activeContract(contracts,now) ?? reference;
-        } else if (row.name==="XAU/USD" || row.name==="XAG/USD") q=await feeds.metal(row.name);
-        else if (["EUR/USD","GBP/USD","USD/JPY"].includes(row.name)) {
-          const bars=await feeds.forex(row.name,"15min");
-          const last=bars.filter(b=>Date.parse(b.t)+900000<=+now).at(-1);
-          if (last) q={symbol:row.name,provider:"Twelve Data · chiusura 15 min",currency:row.name.slice(-3),
-            regularMarketPrice:last.c,regularMarketTime:(Date.parse(last.t)+900000)/1000};
+        } else if (["XAU/USD","XAG/USD","EUR/USD","GBP/USD","USD/JPY"].includes(row.name)) {
+          q=await feeds.spotQuote(row.name,now);
         } else if (row.name==="Treasury USA 10Y") q=await feeds.treasury();
         else q=await feeds.yahooQuote(row.symbols[0]);
       } catch (e) { problem = e instanceof Error && /^(Feed |Chiave |Endpoint )/.test(e.message) ? " · "+e.message : " · fonte indisponibile"; }
@@ -127,8 +123,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
     const age = +now-q.regularMarketTime*1000;
     const stamp = new Date(q.regularMarketTime*1000).toISOString();
     const maxAge = (q.observationDate ? freshness.daily : row.exchange ? freshness.futures : row.name.startsWith("XA") ? freshness.spot : freshness.forex)*60_000;
-    const delay = age > maxAge ? "dato datato" : q.exchangeDataDelayedBy === 0 ? "real-time dichiarato" :
-      positive(q.exchangeDataDelayedBy) ? "ritardo "+q.exchangeDataDelayedBy+" min" : "latenza non verificabile";
+    const delay = quoteQuality(q,now,maxAge);
     const withinWindow = q.sessionStart && q.sessionEnd && q.sessionStart*1000<=+now && +now<q.sessionEnd*1000 &&
       q.regularMarketTime>=q.sessionStart;
     const session = age <= 20*60_000 && q.marketState === "REGULAR" ? "aperta secondo il feed" :
@@ -149,14 +144,14 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       text.push("Volume seduta "+fmt(q.regularMarketVolume));
       if (positive(q.regularMarketVwap)) text.push("VWAP seduta "+fmt(q.regularMarketVwap));
     }
-    if (q.continuous || q.provider==="goldApi.dev") {
+    if (q.continuous || (q.provider==="goldApi.dev" || q.provider?.includes("fallback spot"))) {
       text.push(q.continuous ? "Indicatori sospesi: rollover della serie continua non verificabile." : "OHLC spot non disponibili.");
       continue;
     }
     const frames = [["15m","5d",15],["1h","1mo",60],["1d","3mo",1440]] as const;
     const fixture = fake ? await state.read<Record<string,Bar[]>>("fake-gold-bars.json") : undefined;
     const indicators = await Promise.all(frames.map(async ([interval,range,min]) => {
-      const bars = fake ? fixture?.[q.symbol+"/"+interval] ?? [] : forex ? await feeds.forex(row.name,interval==="15m"?"15min":interval==="1d"?"1day":"1h").catch(()=>[]) : await feeds.yahooBars(q.symbol,range,interval).catch(()=>[]);
+      const bars = fake ? fixture?.[q.symbol+"/"+interval] ?? [] : forex ? await feeds.forex(row.name,interval==="15m"?"15min":interval==="1d"?"1day":"1h",false).catch(()=>[]) : await feeds.yahooBars(q.symbol,range,interval).catch(()=>[]);
       return technical(bars,min,now);
     }));
     for (const [i, result] of indicators.entries()) {

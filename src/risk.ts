@@ -23,9 +23,12 @@ export function stops(snapshot: Snapshot): Proposal[] {
 
 export function limitFor(order: Proposal, charts: Series[], now: Date) {
   if (order.side === "sell") return null;
-  const last = charts.find(x => x.symbol === order.symbol)?.intervals["15Min"]?.at(-1);
+  const series = charts.find(x => x.symbol === order.symbol);
+  if (!series || series.intervalErrors?.["15Min"] || (series.observation && series.observation.provider!=="Alpaca IEX")) return null;
+  const last = series.intervals["15Min"]?.at(-1);
   const age = last ? +now - Date.parse(last.t) : Infinity;
-  if (!last || !(age >= 0 && age <= 45 * 60_000) || !Number.isFinite(last.c) || last.c <= 0) return null;
+  if (!last || !(age >= 0 && age <= 45 * 60_000) || ![last.o,last.h,last.l,last.c].every(v=>Number.isFinite(v) && v>0) ||
+      last.l>Math.min(last.o,last.c) || last.h<Math.max(last.o,last.c)) return null;
   const decimals = last.c >= 1 ? 100 : 10000;
   return Math.floor(last.c * decimals) / decimals;
 }

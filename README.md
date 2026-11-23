@@ -91,3 +91,11 @@ the account-documented USD `GOLDAPI_URL_TEMPLATE` containing `{metal}`.
 Confirm the key header, response schema, usage terms and request allowances
 against your accounts before deployment. See the [configuration details and
 provider references](README.it.md#provider-di-monitoraggio).
+
+
+Free-tier requests share persistent quotas across worker processes. Twelve Data
+uses at most 8 credits per rolling minute and 700 per UTC day (6 and 640 for
+secondary analysis). Gold spot uses at most 80 requests per rolling hour, with
+16 reserved for priority requests. The worker uses account balance headers when
+available. Run `bun src/cli.ts api-usage` for local counters without an API call.
+Spot fallback requires an equivalent currency pair and verified provider timestamps.

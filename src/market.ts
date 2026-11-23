@@ -14,13 +14,14 @@ async function json<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function yahoo(symbol: string, range: string, interval: string): Promise<Candle[]> {
+export async function yahoo(symbol: string, range: string, interval: string, spotCurrency?:string): Promise<Candle[]> {
   type Quote = Record<"open" | "high" | "low" | "close" | "volume", (number | null)[]>;
-  const data = await json<{ chart: { result: { meta?: { symbol?: string }; timestamp: number[]; indicators: { quote: Quote[] } }[] } }>(
+  const data = await json<{ chart: { result: { meta?: { symbol?: string; currency?:string; instrumentType?:string }; timestamp: number[]; indicators: { quote: Quote[] } }[] } }>(
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`,
   );
   const result = data.chart.result?.[0];
   if (!result || result.meta?.symbol?.toUpperCase() !== symbol.toUpperCase()) throw new Error("Serie assente o simbolo non corrispondente.");
+  if (spotCurrency && (result.meta?.instrumentType!=="CURRENCY" || result.meta.currency!==spotCurrency)) throw new Error("Identità Forex non verificabile.");
   const q = result.indicators.quote[0];
   return result.timestamp.flatMap((stamp, i) => {
     const [o, h, l, c, v] = [q.open[i], q.high[i], q.low[i], q.close[i], q.volume?.[i] ?? null];

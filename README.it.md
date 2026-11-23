@@ -95,11 +95,27 @@ api.goldapi.dev. Il nome dell'header chiave è configurabile con
 `GOLDAPI_AUTH_HEADER` (default X-API-Key). Il parser richiede identità del
 metallo, valuta USD, prezzo e timestamp nella risposta JSON o nel campo data.
 Verificare endpoint, formato, condizioni d'uso e quota nel pannello del piano.
-Non inviare chiavi in chat. Il briefing spot usa al massimo due richieste al
-giorno per impostazione predefinita. Twelve Data è limitato localmente a
-8 richieste al minuto e 800 al giorno; ridurre `TWELVE_DATA_DAILY_LIMIT`
-e `GOLDAPI_DAILY_LIMIT` secondo il piano e l'uso da altre applicazioni.
-Le statistiche persistenti sono in `state/providers/{alpaca,twelve,gold,yahoo,fred}.json`.
+Non inviare chiavi in chat. Ogni richiesta gratuita prenota il credito nello stato persistente prima
+dell'invio. Discovery, briefing e analisi operative condividono cache e budget.
+Per Twelve Data Basic si applicano 8 crediti in 60 secondi mobili e un tetto
+prudenziale di 700 per giorno UTC (piano dichiarato: 800). Le attività secondarie
+si fermano a 6/minuto o 640/giorno. Per goldApi.dev Free si usano solo quotazioni
+spot: tetto di 80 richieste in 60 minuti mobili (piano dichiarato: 100), di cui
+16 riservate all'oro prioritario. Gli eventuali limiti locali inferiori impostati
+con `TWELVE_DATA_DAILY_LIMIT` e `GOLDAPI_DAILY_LIMIT` continuano ad applicarsi.
+Il worker contabilizza il peso dichiarato della richiesta e il saldo comunicato
+dal provider, anche quando altri programmi usano la stessa chiave. In mancanza
+di header può misurare solo il proprio traffico. Un 429 sospende le richieste
+anche dopo un riavvio e rispetta Retry-After.
+
+`bun src/cli.ts api-usage` mostra chiamate totali, unità consumate oggi (UTC),
+consumo nella finestra mobile e ultimi saldi validi senza consultare le API.
+Per i metalli e il Forex una fonte spot equivalente viene interrogata solo
+quando quella preferita manca o non è abbastanza recente o completa.
+Per i confronti conta il timestamp del prezzo o della chiusura della candela.
+Il briefing mostra esplicitamente il provider di fallback. Nella pausa settimanale
+OTC (intervallo prudenziale da venerdì 18:00 a domenica 16:00 a New York) si riusa la cache; per le azioni
+si usa la prossima apertura indicata da Alpaca. La crypto mantiene la sessione 24/7.
 
 Documentazione: [Twelve Data](https://twelvedata.com/docs),
 [goldApi.dev](https://goldapi.dev), [FRED DGS10](https://fred.stlouisfed.org/series/DGS10),

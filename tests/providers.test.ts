@@ -1,9 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn, setSystemTime } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MonitorFeeds, equities, normalize } from "../src/monitor-feeds";
-import { cached, FeedFailure } from "../src/provider-cache";
+import { MonitorFeeds, equities, normalize, quoteQuality } from "../src/monitor-feeds";
+import { cached, FeedFailure, publicResponse, freeUsage } from "../src/provider-cache";
 import { goldBriefing, technical } from "../src/gold-briefing";
 import { State } from "../src/state";
 import { universe } from "../src/broker";
@@ -12,6 +12,7 @@ const original=globalThis.fetch;
 const variables=["GOLDAPI_KEY","TWELVE_DATA_API_KEY","GOLDAPI_URL_TEMPLATE"];
 const saved=variables.map(k=>process.env[k]);
 afterEach(async()=>{
+  setSystemTime();
   globalThis.fetch=original;
   variables.forEach((k,i)=>{if(saved[i]===undefined) delete process.env[k]; else process.env[k]=saved[i]});
   await Promise.all(dirs.splice(0).map(d=>rm(d,{recursive:true,force:true})));
@@ -59,6 +60,7 @@ test("catalogo azioni, ETF a leva e crypto con ticker interno persistente e solo
   expect([...universe]).toEqual(["SPY","QQQ","IWM","AAPL","MSFT","NVDA","GLD","TLT"]);
 });
 test("Twelve Data controlla identità, intervallo, UTC e 429 nel JSON",async()=>{
+  setSystemTime(new Date("2026-11-23T13:00:00Z"));
   process.env.TWELVE_DATA_API_KEY="test-only";
   const f=new MonitorFeeds(await state());
   http((u,init)=>{
@@ -75,6 +77,7 @@ test("metalli spot richiedono chiave e identità USD, nessun indicatore da un ti
   delete process.env.GOLDAPI_KEY;
   const f=new MonitorFeeds(await state());
   await expect(f.metal("XAU/USD")).rejects.toThrow("assente");
+  setSystemTime(new Date("2026-11-23T13:00:00Z"));
   process.env.GOLDAPI_KEY="test-only";process.env.GOLDAPI_URL_TEMPLATE="https://goldapi.dev/test/{metal}";
   http(()=>Response.json({metal:"XAU",currency:"USD",price:2420,timestamp:1795433400,bid:2419,ask:2421}));
   expect(await f.metal("XAU/USD")).toMatchObject({provider:"goldApi.dev",regularMarketPrice:2420,bid:2419,ask:2421});
@@ -141,4 +144,113 @@ test("watchlist crypto precedente leggibile con la stessa identità e senza risc
   await engine.collect({coverage:[],candidates:[{instrument:item} as any]},[],new Date());
   expect((await s.read<any>("watchlist.json")).watchlist).toEqual(watchlist);
   expect(await engine.proposals()).toEqual([]);
+});
+
+test("Twelve Basic: concorrenza, riserva di due crediti e limite mobile di otto",async()=>{
+  const s=await state();
+  let calls=0;
+  const read=(key:string,priority=false)=>cached(s,"twelve",key,60000,async()=>++calls,8,700,{priority});
+  const jobs=await Promise.allSettled(Array.from({length:11},(_,i)=>read(String(i))));
+  expect(jobs.filter(r=>r.status==="fulfilled")).toHaveLength(6);
+  await read("briefing",true);await read("operativo",true);
+  await expect(read("nono",true)).rejects.toThrow("429");
+  expect(calls).toBe(8);
+});
+
+test("Twelve Basic: riserva giornaliera e reset a mezzanotte UTC",async()=>{
+  const s=await state(), start=Date.parse("2026-11-23T23:59:59Z");
+  const clock=spyOn(Date,"now").mockReturnValue(start);
+  try {
+    await s.write("providers/twelve.json",{day:"2026-11-23",minute:0,count:0,daily:699,calls:699,errors:0,pause:0,recent:[]});
+    const run=(key:string,priority=false)=>cached(s,"twelve",key,15,async()=>1,8,800,{priority});
+    await expect(run("discovery")).rejects.toThrow("429");
+    await run("ultimo",true);
+    await expect(run("altro",true)).rejects.toThrow("429");
+    clock.mockReturnValue(start+2000);
+    await run("nuovo giorno");
+    expect(await s.read("providers/twelve.json")).toMatchObject({daily:1,day:"2026-11-24",calls:701});
+  } finally {clock.mockRestore()}
+});
+
+test("gold Free: ottanta richieste per ora mobile, inclusi sedici posti prioritari",async()=>{
+  const s=await state(), now=Date.now();
+  const clock=spyOn(Date,"now").mockReturnValue(now);
+  try {
+    await s.write("providers/gold.json",{day:new Date(now).toISOString().slice(0,10),minute:0,count:0,daily:100,calls:100,errors:0,pause:0,recent:Array(79).fill(now-5000)});
+    const run=(k:string,priority=false)=>cached(s,"gold",k,10,async()=>1,100,Infinity,{priority});
+    await expect(run("secondario")).rejects.toThrow("429");
+    await run("oro",true);await expect(run("oltre",true)).rejects.toThrow("429");
+    clock.mockReturnValue(now+3595001);
+    await run("finestra successiva");
+  } finally {clock.mockRestore()}
+});
+test("crediti consumati esternamente: header a zero blocca anche dopo il riavvio",async()=>{
+  const s=await state();let calls=0;
+  http(()=>{calls++;return new Response("ok",{headers:{"api-credits-left":"0"}})});
+  const read=(store:State,k:string)=>cached(store,"twelve",k,60000,async()=>(await publicResponse(new URL("https://example.test/fixture"))).text(),8,700,{priority:true});
+  await read(s,"a");
+  expect(await read(new State(s.root),"a")).toBe("ok");
+  await expect(read(new State(s.root),"b")).rejects.toThrow("429");
+  expect(calls).toBe(1);
+  expect((await freeUsage(s))[0]).toMatchObject({sinceStart:1,providerRemaining:{minute:{left:0}}});
+});
+test("fallback spot: seleziona solo la coppia equivalente più recente e identifica il ritardo",async()=>{
+  const f=new MonitorFeeds(await state());
+  const now=new Date("2026-11-23T12:00:00Z"), ts=+now/1000;
+  const metal=spyOn(f,"metal").mockResolvedValue({symbol:"XAU/USD",provider:"goldApi.dev",currency:"USD",regularMarketPrice:30,regularMarketTime:ts-3600});
+  const fallback={symbol:"XAUUSD=X",currency:"USD",instrumentType:"CURRENCY",regularMarketPrice:31,regularMarketTime:ts-600,exchangeDataDelayedBy:10};
+  const yahoo=spyOn(f,"yahooQuote").mockResolvedValue(fallback);
+  const result=await f.spotQuote("XAU/USD",now);
+  expect(result.provider).toContain("fallback");expect(quoteQuality(result,now,900000)).toBe("ritardo 10 min");
+  yahoo.mockResolvedValue({...fallback,instrumentType:"FUTURE"});
+  expect((await f.spotQuote("XAU/USD",now)).provider).toBe("goldApi.dev");
+  metal.mockResolvedValue({...fallback,symbol:"XAU/USD",provider:"goldApi.dev",regularMarketTime:ts-10});
+  expect((await f.spotQuote("XAU/USD",now)).provider).toBe("goldApi.dev");
+  expect(yahoo).toHaveBeenCalledTimes(2);
+  await expect(f.spotQuote("Gold CFD",now)).rejects.toThrow();
+});
+test("chiusura weekend: usa la cache scaduta senza richieste ai provider",async()=>{
+  setSystemTime(new Date("2026-11-20T16:00:00Z"));
+  process.env.GOLDAPI_KEY="test-only";process.env.GOLDAPI_URL_TEMPLATE="https://goldapi.dev/test/{metal}";
+  const f=new MonitorFeeds(await state());
+  let calls=0;
+  http(()=>{calls++;return Response.json({symbol:"XAU",currency:"USD",price:2990,timestamp:Date.now()/1000})});
+  const friday=await f.spotQuote("XAU/USD",new Date());
+  setSystemTime(new Date("2026-11-21T12:00:00Z"));
+  const weekend=await f.spotQuote("XAU/USD",new Date());
+  expect(weekend).toEqual(friday);
+  expect(quoteQuality(weekend,new Date(),900000)).toBe("dato datato");
+  expect(calls).toBe(1);
+});
+test("Twelve Data contabilizza il peso indicato nella risposta",async()=>{
+  const s=await state();
+  http(()=>new Response("ok",{headers:{"api-credits-used":"3","api-credits-left":"5"}}));
+  await cached(s,"twelve","fixture",1000,async()=>(await publicResponse(new URL("https://example.test/fixture"))).text());
+  expect((await freeUsage(s))[0]).toMatchObject({sinceStart:1,todayUTC:3,windowUnits:3});
+});
+test("il limite Paper rifiuta OHLC incoerenti e dati informativi anche se recenti",async()=>{
+  const {limitFor}=await import("../src/risk");
+  const {fakeCharts}=await import("../src/market");
+  const now=new Date(), order={symbol:"SPY",side:"buy" as const,qty:1,reason:"test"};
+  const charts=fakeCharts(now), spy=charts.find(s=>s.symbol==="SPY")!;
+  expect(limitFor(order,charts,now)).toBeGreaterThan(0);
+  const bar=spy.intervals["15Min"].at(-1)!;
+  bar.h=bar.c-1;expect(limitFor(order,charts,now)).toBeNull();
+  bar.h=bar.c+1;
+  spy.observation={provider:"Yahoo Chart v8 · fallback spot"} as any;
+  expect(limitFor(order,charts,now)).toBeNull();
+});
+test("Forex passa alla serie equivalente completa senza mescolare timeframe",async()=>{
+  setSystemTime(new Date("2026-11-23T12:00:00Z"));
+  const f=new MonitorFeeds(await state()),now=Date.now();
+  spyOn(f,"forex").mockRejectedValue(new FeedFailure(429));
+  const yahoo=spyOn(f,"yahooBars").mockImplementation(async(_symbol,_range,interval,currency)=>{
+    expect(currency).toBe("JPY");
+    const duration=interval==="1d"?86400000:900000;
+    return Array.from({length:22},(_,i)=>({t:new Date(now-(22-i)*duration).toISOString(),o:145,l:140,h:150,c:146,v:null}));
+  });
+  const series=await f.series({symbol:"USD/JPY",ticker:"JPY=X"});
+  expect(series.observation).toMatchObject({provider:"Yahoo Chart v8 · fallback spot",providerSymbol:"JPY=X",currency:"JPY",price:146});
+  expect(series.intervals["1Day"]).toHaveLength(22);
+  expect(yahoo).toHaveBeenCalledTimes(2);
 });
