@@ -480,3 +480,48 @@ test("Resoconto Telegram fake ritenta dopo riavvio senza ripetere la sveglia", a
   expect(delivered[0]).toMatchObject({ id: original.id, attempts: 2, delivered: expect.any(String) });
   expect(await f.state.list("fake-chat")).toHaveLength(2);
 });
+
+test("12:30 Gold automatico e manuale, futures aperti con NYSE chiusa; riavvio senza duplicati", async () => {
+  const f = await fixture();
+  const now = new Date("2026-11-23T11:30:00Z");
+  const clock = join(f.base, "gold-clock");
+  await Bun.write(clock,String(+now));
+  const env = { TEST_SCHEDULER_CLOCK: clock, BUN_OPTIONS: "--preload="+join(fixtureFiles,"efficiency-scheduler-preload.ts") };
+  await f.state.write("fake-open.json",false);
+  await f.state.write("test-scan-resume.json",true);
+  const q = { symbol: "GCZ26.CMX", regularMarketTime: +now/1000, expireDate: +now/1000+86400*35,
+    regularMarketPrice: 2400, regularMarketVolume: 150, marketState: "REGULAR", exchangeDataDelayedBy: 10 };
+  await f.state.write("fake-gold-quotes.json",[q,{...q,symbol:"GCX26.CMX",expireDate:+now/1000-1,regularMarketVolume:500},
+    {...q,symbol:"EURUSD=X",regularMarketTime:+now/1000-3600}]);
+  await f.state.write("gold-contracts.json",{GC:"GCX26.CMX"});
+  const article = { title:"Gold and Fed rates",summary:"Inflation report.",source:"Fonte finta",link:"https://example.org/rates",published:now.toISOString(),symbols:[] };
+  await f.state.write("news.json",{lastSuccess:now.toISOString(),checked:now.toISOString(),articles:[article,{...article,link:"https://example.org/reprint"}]});
+  const scheduler = f.command(["schedule"],"",env);
+  try {
+    await until(async () => (await f.state.list("fake-chat")).find(name=>name.startsWith("gold-")));
+  } finally { scheduler.proc.kill("SIGTERM"); }
+  expect((await scheduler.outcome).code).toBe(0);
+  expect((await f.once("",env,"12:30").outcome).code).toBe(0);
+  const [name] = await f.state.list("fake-chat");
+  const report = (await f.state.read<Message>("fake-chat/"+name))!;
+  for (const part of ["GOLD","MATERIE PRIME","FOREX E MACRO","NOTIZIE","PROSSIMO CONTROLLO","OPERAZIONI","GCZ26.CMX","aperta secondo il feed","ritardo 10 min","Rollover","dato datato","Gold CFD · CFD broker · quotazione non verificabile"]) expect(report.text).toContain(part);
+  expect(report.text.match(/Gold and Fed rates/g)).toHaveLength(1);
+  expect(await f.state.list("fake-chat")).toHaveLength(1);
+  expect(await f.orders()).toEqual([]);
+  expect(await f.state.list("intents")).toHaveLength(0);
+  expect(await f.state.read("baton.json")).toBeUndefined();
+  const manual = await fixture();
+  expect((await manual.once("",env,"12:30").outcome).code).toBe(0);
+  const [missing] = await manual.messages();
+  expect(missing?.text).toContain("contratto attivo e prezzo non verificabili");
+  expect(await manual.orders()).toEqual([]);
+});
+
+test("indicatori oro solo su barre complete, ATR e RSI e range precedente", async () => {
+  const { technical } = await import("../src/gold-briefing");
+  const now = new Date();
+  const bars = Array.from({length:25},(_,i)=>({t:new Date(+now-(25-i)*900000).toISOString(),o:100+i,h:101+i,l:99+i,c:100+i,v:null}));
+  expect(technical([],15,now)).toBeUndefined();
+  expect(technical(bars,15,now)).toMatchObject({atr:2,rsi:100,high:124,low:83+20,fast:122});
+  expect(technical([...bars,{...bars[0],t:now.toISOString(),c:999}],15,now)).toEqual(technical(bars,15,now));
+});

@@ -1,4 +1,5 @@
 export const slots = ["09:00", "15:40", "18:30", "21:40"] as const;
+export const scheduledSlots = ["09:00", "12:30", "15:40", "18:30", "21:40"] as const;
 export type Slot = typeof slots[number];
 export type Wake = { date: string; slot: Slot; id: string };
 const format = new Intl.DateTimeFormat("en-CA", {
@@ -29,7 +30,7 @@ export function missed(after: Wake, before: Wake) {
 
 export function nextWake(now: Date) {
   const { date, time } = rome(now);
-  const next = slots.find(slot => slot > time);
+  const next = scheduledSlots.find(slot => slot > time);
   if (next) return `${date} ${next}`;
   const tomorrow = new Date(date + "T00:00:00Z");
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);

@@ -1,6 +1,7 @@
 import { RetryDelivery, type Channel, type Message } from "./chat";
 
 const titles = {
+  gold: "Gold & Futures",
   chiusura: "Riepilogo chiusura USA",
   resoconto: "Resoconto",
   mercato: "Mercato da monitorare",

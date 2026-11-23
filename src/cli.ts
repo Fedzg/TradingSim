@@ -16,7 +16,8 @@ import { queueNewsSignals } from "./news-signals";
 import { run } from "./run";
 import { State } from "./state";
 import { TelegramChannel } from "./telegram";
-import { newYork, nextWake, rome, slots, wake, type Slot } from "./time";
+import { goldBriefing } from "./gold-briefing";
+import { newYork, scheduledSlots, nextWake, rome, slots, wake, type Slot } from "./time";
 
 const bun = process.execPath;
 const script = import.meta.path;
@@ -83,12 +84,12 @@ async function status() {
 }
 
 async function once() {
-  if (selected >= 0 && !slots.includes(rawSlot as Slot)) throw new Error("Slot non valido. Usa 09:00, 15:40, 18:30 o 21:40.");
+  if (selected >= 0 && !scheduledSlots.some(slot => slot === rawSlot)) throw new Error("Slot non valido. Usa 09:00, 12:30, 15:40, 18:30 o 21:40.");
   const { date, time } = rome(new Date());
-  const slot = rawSlot as Slot | undefined ?? slots.filter(x => x <= time).at(-1);
+  const slot = rawSlot ?? scheduledSlots.filter(x => x <= time).at(-1);
   if (!slot) throw new Error("Nessuna sveglia di oggi è ancora trascorsa.");
   if (slot > time && !fake) throw new Error("La sveglia scelta è ancora futura in ora di Roma.");
-  const proc = child("run.guard", "_run", [...mode, "--slot", slot, "--date", date, ...(force ? ["--force"] : [])]);
+  const proc = child(slot === "12:30" ? "gold.guard" : "run.guard", slot === "12:30" ? "_gold" : "_run", [...mode, "--slot", slot, "--date", date, ...(force ? ["--force"] : [])]);
   process.exitCode = exitStatus(await proc.exited);
   await child("outbox.guard", "_flush", mode).exited;
 }
@@ -102,6 +103,7 @@ async function schedule() {
   if (!(interval >= 30_000 && Number.isFinite(interval))) throw new Error("Intervallo delle notizie non valido: minimo 30 secondi.");
   let lastChecked = 0;
   let lastLaunch = "";
+  let goldDay = "";
   let active: ReturnType<typeof child> | undefined;
   let discovering = false;
   let polling = false;
@@ -118,7 +120,7 @@ async function schedule() {
       if (command === "_discover") discovering = false;
       if (command === "_orders") polling = false;
       if (command === "_close") closing = false;
-      if ((command === "_orders" || command === "_discover" || command === "_close") && !stopping) background("outbox.guard", "_flush");
+      if ((command === "_orders" || command === "_discover" || command === "_close" || command === "_gold") && !stopping) background("outbox.guard", "_flush");
     });
   }
   let wakeUp: (() => void) | undefined;
@@ -149,6 +151,10 @@ async function schedule() {
             if (!stopping) background("outbox.guard", "_flush");
           });
         }
+      }
+      if (time === "12:30" && goldDay !== date) {
+        background("gold.guard", "_gold");
+        goldDay = date;
       }
       if (!discovering) {
         discovering = true;
@@ -291,6 +297,7 @@ try {
       }
       break;
     }
+    case "_gold": await goldBriefing(state, new Date(), fake, opts.redact); break;
     case "_close": await dailyClose(state, paper(), new Date(), opts.redact); break;
     case "_orders": await pollOrders(state, paper(), opts.redact); break;
     case "_flush": await flushNotifications(state, channel, opts.redact); break;

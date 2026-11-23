@@ -64,3 +64,14 @@ to inspect proposals and grant permission. Logs may include Paper account data.
   the saved watchlist.
 
 See [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md).
+
+### Gold & Futures briefing
+
+At 12:30 Europe/Rome the scheduler sends a read-only gold, commodities and FX
+briefing. Run it manually with `bun src/cli.ts once --slot 12:30 --fake`
+for a simulation. It uses timestamped indicative Yahoo data and cached news.
+For futures it compares volumes among dated, unexpired contracts in an
+eight-month window and reports contract changes. Brent refers to NYMEX BZ.
+Coverage, quote delay and session status depend on the provider. A licensed
+venue feed can supply detailed holiday and maintenance schedules. A Gold CFD
+requires its own broker quote. Missing data is identified in the report.

@@ -48,3 +48,16 @@ prima il permesso dell’operatore e poi una revisione indipendente.
 Vedi [Permesso e revisione della watchlist](deploy/README.md#permesso-e-revisione-della-watchlist).
 
 Vedi [Contribuire](CONTRIBUTING.md#italiano) e [Sicurezza](SECURITY.md#italiano).
+
+### Briefing Gold & Futures
+
+Alle 12:30 Europe/Rome lo scheduler crea un briefing informativo separato.
+Avvio manuale: `bun src/cli.ts once --slot 12:30` (aggiungere `--fake` per simulare).
+Il feed indicativo Yahoo può richiedere autorizzazione o non coprire alcuni simboli.
+Per ogni future si confrontano i contratti datati dei prossimi otto mesi con
+scadenza verificata, usando il volume di seduta disponibile. Il cambio di
+contratto è indicato esplicitamente. Ogni analisi usa una sola scadenza.
+Lo stato della sessione dipende dai metadati del singolo mercato.
+Per calendari completi di festività e pause, dati tick e VWAP ufficiali
+servirebbe un feed autorizzato CME/ICE. Per Gold CFD serve il feed del
+broker specifico. I prezzi spot e futures non rappresentano quel CFD.
