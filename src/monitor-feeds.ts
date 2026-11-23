@@ -14,7 +14,7 @@ export const freshness = {spot:15, forex:30, futures:20, crypto:20, equity:30, i
 export type Quote = { symbol: string; regularMarketPrice: number; regularMarketTime: number; regularMarketVolume?: number;
   regularMarketPreviousClose?: number; regularMarketVwap?: number; regularMarketDayHigh?: number; regularMarketDayLow?: number;
   exchangeDataDelayedBy?: number; marketState?: string; expireDate?: number; currency?: string; provider?: string;
-  sessionStart?: number; sessionEnd?: number; exchange?: string; instrumentType?: string; continuous?: boolean; bid?: number; ask?: number; observationDate?: string };
+  responseAt?:string; sessionStart?: number; sessionEnd?: number; exchange?: string; instrumentType?: string; continuous?: boolean; bid?: number; ask?: number; observationDate?: string };
 const spotTickers:Record<string,string>={"XAU/USD":"XAUUSD=X","XAG/USD":"XAGUSD=X","EUR/USD":"EURUSD=X","GBP/USD":"GBPUSD=X","USD/JPY":"JPY=X"};
 function weekendClosed(now=new Date()) {
   const ny=newYork(now);
@@ -23,7 +23,7 @@ function weekendClosed(now=new Date()) {
 }
 export function quoteQuality(q:Quote, now:Date, maxAge:number) {
   const age=+now-q.regularMarketTime*1000;
-  if (!Number.isFinite(age) || age<0) return "timestamp non verificabile";
+  if (!positive(q.regularMarketTime) || !Number.isFinite(age) || age<0) return "timestamp non verificabile";
   if (age>maxAge) return "dato datato";
   if (q.exchangeDataDelayedBy && q.exchangeDataDelayedBy>0) return "ritardo "+q.exchangeDataDelayedBy+" min";
   return "prezzo recente · "+(q.exchangeDataDelayedBy===0?"ritardo dichiarato 0 min":"latenza non verificabile");
@@ -37,7 +37,7 @@ async function secret(name: string) {
 export const sourceOf = (s:string) => equities.includes(s) ? "Alpaca IEX" : /^(BTC|ETH)[/-]USD$/.test(s) ? "Alpaca Crypto" :
   pairs.includes(s) ? "Twelve Data" : "Yahoo Chart v8";
 export class MonitorFeeds {
-  constructor(readonly state: State, readonly mcp?: Mcp, readonly priority=false) {}
+  constructor(readonly state: State, readonly mcp?: Mcp, readonly priority=false, readonly verifyDirect=false) {}
   async equitySession() {
     return cached(this.state,"alpaca","market-clock-v2",(v:{open:boolean;next:number})=>v.open?mins:Math.max(mins,v.next-Date.now()),async()=>{
       const clock=await payload<{is_open:boolean;timestamp:string;next_open?:string}>(this.mcp!,"get_clock");
@@ -63,7 +63,7 @@ export class MonitorFeeds {
         if (!Number.isFinite(t) || ![o,h,l,c].every(positive) || l>Math.min(o,c) || h<Math.max(o,c)) throw new FeedFailure(0);
         return {t:new Date(t).toISOString(),o,h,l,c,v:null};
       }) as Bar[];
-    },8,Math.min(700,Number(process.env.TWELVE_DATA_DAILY_LIMIT ?? 700)),{priority,cacheOnly:weekendClosed()});
+    },8,Math.min(700,Number(process.env.TWELVE_DATA_DAILY_LIMIT ?? 700)),{priority,fresh:this.verifyDirect,cacheOnly:!this.verifyDirect && weekendClosed()});
   }
   async yahooQuote(symbol: string, cacheOnly=false) {
     return cached(this.state,"yahoo",symbol+"/quote",(q:Quote)=>q.marketState==="CLOSED" ? 60*mins : 10*mins,async () => {
@@ -107,7 +107,7 @@ export class MonitorFeeds {
   }
   async metal(symbol: string): Promise<Quote> {
     const key = await secret("GOLDAPI_KEY");
-    const template = process.env.GOLDAPI_URL_TEMPLATE;
+    const template = process.env.GOLDAPI_URL_TEMPLATE || "https://goldapi.dev/api/v1/price/{metal}/USD";
     if (!template || !template.includes("{metal}")) throw new Error("Endpoint goldApi.dev del piano non configurato");
     const metal = symbol.split("/")[0];
     const url = new URL(template.replace("{metal}",metal));
@@ -117,10 +117,11 @@ export class MonitorFeeds {
       const data = await (await publicResponse(url,{[header]:key})).json();
       const quote = data.data ?? data;
       const at = typeof quote.timestamp==="number" ? (quote.timestamp>1e12 ? quote.timestamp/1000 : quote.timestamp) : Date.parse(quote.timestamp)/1000;
-      if (![metal,symbol].includes(quote.symbol ?? quote.metal) || quote.currency !== "USD" || !positive(quote.price) || !positive(at)) throw new FeedFailure(0);
-      return {symbol,provider:"goldApi.dev",regularMarketPrice:quote.price,regularMarketTime:at,currency:"USD",
+      const responseAt=Date.parse(quote.updatedAt ?? data.updatedAt);
+      if (![metal,symbol].includes(quote.symbol ?? quote.metal) || quote.currency !== "USD" || !positive(quote.price) || (!positive(at) && !Number.isFinite(responseAt))) throw new FeedFailure(0);
+      return {symbol,provider:"goldApi.dev",regularMarketPrice:quote.price,regularMarketTime:positive(at)?at:0,responseAt:Number.isFinite(responseAt)?new Date(responseAt).toISOString():undefined,currency:"USD",
         bid:positive(quote.bid) ? quote.bid : undefined, ask:positive(quote.ask) ? quote.ask : undefined};
-    },80,Number(process.env.GOLDAPI_DAILY_LIMIT ?? Infinity),{priority:this.priority && symbol==="XAU/USD",cacheOnly:weekendClosed()});
+    },80,Number(process.env.GOLDAPI_DAILY_LIMIT ?? Infinity),{priority:this.priority && symbol==="XAU/USD",fresh:this.verifyDirect,cacheOnly:!this.verifyDirect && weekendClosed()});
   }
   async spotQuote(symbol:string, now:Date):Promise<Quote> {
     const ticker=spotTickers[symbol];

@@ -260,6 +260,23 @@ try {
     case "api-usage": console.log(JSON.stringify(await freeUsage(state),null,2)); break;
     case "monitor-check": {
       if (fake) throw new Error("Usa bun test per le verifiche offline dei provider.");
+      if (flags.includes("--setup")) {
+        const check=async (fn:()=>Promise<unknown>)=>{try {return !!await fn();} catch {return false;}};
+        const direct=new MonitorFeeds(state,mcp,true,true);
+        const alpaca=await check(()=>paper().account());
+        const twelve=await check(async()=> (await direct.forex("EUR/USD","15min",true)).length>0);
+        const gold=await check(async()=> (await direct.metal("XAU/USD")).provider==="goldApi.dev");
+        const telegram=await check(async()=>{
+          if (!opts.telegram) return false;
+          const res=await fetch("https://api.telegram.org/bot"+opts.telegram.token+"/getChat",{
+            method:"POST",redirect:"error",signal:AbortSignal.timeout(8000),
+            body:new URLSearchParams({chat_id:opts.telegram.chatId})});
+          const data=await res.json();
+          return res.ok && data.ok===true && String(data.result?.id)===opts.telegram.chatId;
+        });
+        console.log(JSON.stringify({alpaca,telegram,twelve,gold}));
+        break;
+      }
       console.log(opts.redact((await buildGoldReport(state,new Date(),false)).text));
       for (const item of catalog) {
         try {

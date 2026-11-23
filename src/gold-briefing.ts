@@ -117,6 +117,10 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       } catch (e) { problem = e instanceof Error && /^(Feed |Chiave |Endpoint )/.test(e.message) ? " · "+e.message : " · fonte indisponibile"; }
     }
     const label = row.name+" · "+row.venue;
+    if (q?.responseAt && !q.regularMarketTime) {
+      text.push(label+" · "+q.provider+" · "+fmt(q.regularMarketPrice)+" USD · risposta "+q.responseAt+" · freschezza del prezzo non verificabile.");
+      continue;
+    }
     if (!q || !positive(q.regularMarketPrice) || !positive(q.regularMarketTime) || q.regularMarketTime*1000 > +now) {
       text.push(label+" · "+(row.exchange ? "contratto attivo e prezzo non verificabili" : "quotazione non verificabile")+problem); next.push(row.name+" · ricontrollare disponibilità"); continue;
     }

@@ -254,3 +254,17 @@ test("Forex passa alla serie equivalente completa senza mescolare timeframe",asy
   expect(series.intervals["1Day"]).toHaveLength(22);
   expect(yahoo).toHaveBeenCalledTimes(2);
 });
+
+test("goldApi.dev updatedAt data la risposta, non il prezzo spot",async()=>{
+  setSystemTime(new Date("2026-11-23T13:00:00Z"));
+  process.env.GOLDAPI_KEY="test-only";
+  delete process.env.GOLDAPI_URL_TEMPLATE;
+  http(u=>{
+    expect(u.pathname).toBe("/api/v1/price/XAU/USD");
+    return Response.json({metal:"XAU",currency:"USD",price:2400,updatedAt:"2026-11-23T13:00:00Z"});
+  });
+  const quote=await new MonitorFeeds(await state()).metal("XAU/USD");
+  expect(quote.responseAt).toBe("2026-11-23T13:00:00.000Z");
+  expect(quote.regularMarketTime).toBe(0);
+  expect(quoteQuality(quote,new Date(),900000)).toContain("non verificabile");
+});

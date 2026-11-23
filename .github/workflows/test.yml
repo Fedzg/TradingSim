@@ -13,3 +13,10 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun test
+  finestra-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prova offline dei due percorsi WinForms
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\TradingSim.ps1 -ProvaOffline

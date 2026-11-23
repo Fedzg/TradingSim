@@ -10,7 +10,7 @@ type Entry<T> = { until: number; data?: T; error?: number; failures?: number };
 type Budget = { minute: number; count: number; day: string; daily: number; calls: number; errors: number; pause: number;
   recent?: number[]; limits?: Partial<Record<Window,number>>; remaining?: Partial<Record<Window, { left:number; until:number }>> };
 type Window = "minute" | "hour" | "day";
-type Options = { priority?:boolean; cacheOnly?:boolean };
+type Options = { priority?:boolean; cacheOnly?:boolean; fresh?:boolean };
 const responseHeaders = new AsyncLocalStorage<(headers: Headers)=>void>();
 const minuteMs=60000, hourMs=3600000, dayMs=86400000;
 
@@ -56,7 +56,7 @@ export async function cached<T>(state: State, provider: string, key: string, ttl
   const budgetPath = "providers/"+provider+".json";
   return locked(state, hash, async () => {
     const previous = await state.read<Entry<T>>(path);
-    if (previous && previous.until > Date.now()) {
+    if (previous && previous.until > Date.now() && (!options.fresh || previous.error!==undefined)) {
       if (previous.error !== undefined) throw new FeedFailure(previous.error);
       return previous.data!;
     }

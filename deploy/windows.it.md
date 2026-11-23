@@ -49,3 +49,28 @@ docker @compose exec worker bun src/cli.ts discovery-status
 Questi controlli non inviano ordini o messaggi Telegram. Usa
 `docker @compose stop worker` per fermare lo scheduler. I log possono
 contenere dati Paper. Consultali localmente e oscura i dati prima di condividerli.
+
+### Finestra guidata per Windows e KICKPI
+
+Dal checkout aggiornato aprire PowerShell nella directory che contiene
+`TradingSim.ps1` ed eseguire:
+
+```powershell
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\TradingSim.ps1
+```
+
+Per il PC scegliere **Aggiorna il worker sul PC Windows**. La finestra individua
+il progetto Compose e la cartella privata, verifica l’immagine in un container
+temporaneo e propone l’aggiornamento dopo le letture dirette di tutti i servizi.
+La verifica usa la rete solo dopo i test offline. Telegram usa getChat.
+Per Gold, updatedAt indica l’ora della risposta. Un prezzo senza timestamp
+di mercato resta di freschezza non verificata.
+
+Per la scheda avviare prima una distribuzione Linux con SSH e configurare
+l’accesso con chiave OpenSSH dal PC. Confrontare l’impronta SSH con quella
+visualizzata localmente sulla scheda al primo collegamento. Il wizard richiede
+Docker utilizzabile dall’utente e Compose 2.24 o successivo. Compila e prova
+sulla CPU effettiva; la compatibilità della singola immagine di sistema
+si verifica sul dispositivo. I segreti della scheda sono in
+`~/.local/share/tradingsim-secrets`. Il pulsante Codex avvia il login ufficiale
+via dispositivo in una console. Preparare la KICKPI non avvia il suo scheduler.
