@@ -49,6 +49,7 @@ export async function notificationSelector(state: State, redact: (text: string) 
   return async (message: Message) => {
     if (message.kind === "watchlist" && message.notification === "watchlist-addition" && additionIds.has(message.id) &&
         message.text.includes("Aggiunto alla watchlist. Solo monitoraggio.")) return message;
+    if (message.kind === "strategia" && message.notification === "strategy-alert") return message;
     if (message.kind === "gold" && message.notification === "gold-report") return message;
     if (message.kind === "chiusura" && message.notification === "daily-close") return message;
     if (message.kind === "resoconto" && message.notification === "wake-report") return message;

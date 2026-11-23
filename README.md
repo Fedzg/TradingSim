@@ -99,3 +99,5 @@ secondary analysis). Gold spot uses at most 80 requests per rolling hour, with
 16 reserved for priority requests. The worker uses account balance headers when
 available. Run `bun src/cli.ts api-usage` for local counters without an API call.
 Spot fallback requires an equivalent currency pair and verified provider timestamps.
+
+[Paper strategies, validation and rollout (Italian)](deploy/strategie.it.md)

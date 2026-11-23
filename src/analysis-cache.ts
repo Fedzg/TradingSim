@@ -19,6 +19,7 @@ export function materialChange(
   if (!(age >= 0 && age < analysisTtl && dataAge >= 0 && dataAge <= 90 * 60_000)) return "validità";
   if (market.source !== candidate.market.source || market.url !== candidate.market.url || candidate.instrument.ticker !== cached.candidate.instrument.ticker) return "fonte";
   if (newsEvidence(cached.sources) !== newsEvidence(sources)) return "notizie";
+  if ((prior.setups??[]).join() !== (current.setups??[]).join()) return "setup";
   const direction = Math.sign(prior.dayPct);
   if (Math.sign(current.dayPct) !== direction || Math.sign(current.hourPct) !== Math.sign(prior.hourPct)) return "direzione";
   const invalidated = (price: number) => direction > 0 ? price <= prior.invalidation : price >= prior.invalidation;

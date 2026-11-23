@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { State } from "./state";
 
-type Kind = "gold" | "chiusura" | "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "scenario-grafici" | "ordine" | "allarmi" | "watchlist";
+type Kind = "strategia" | "gold" | "chiusura" | "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "scenario-grafici" | "ordine" | "allarmi" | "watchlist";
 export type Message = {
   id: string;
   text: string;
@@ -11,7 +11,7 @@ export type Message = {
   attempts?: number;
   error?: string;
   partsSent?: number;
-  notification?: "order" | "watchlist-addition" | "wake-report" | "daily-close" | "gold-report";
+  notification?: "strategy-alert" | "order" | "watchlist-addition" | "wake-report" | "daily-close" | "gold-report";
   retryAt?: string;
 };
 export interface Channel { send(message: Message, checkpoint: (partsSent: number) => Promise<void>): Promise<void> }

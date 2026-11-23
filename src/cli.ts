@@ -1,3 +1,5 @@
+import { manageBrackets } from "./strategy-exits";
+import { executionMode } from "./strategies";
 import { mkdir } from "node:fs/promises";
 import { config } from "./config";
 import { Alpaca, FakeBroker } from "./broker";
@@ -170,7 +172,7 @@ async function schedule() {
         discovering = true;
         background("discovery.guard", "_discover");
       }
-      if ((telegram || fake) && !polling && +now - lastOrders >= 60_000) {
+      if ((telegram || fake || executionMode()!=="legacy") && !polling && +now - lastOrders >= 60_000) {
         lastOrders = +now;
         polling = true;
         background("orders.guard", "_orders");
@@ -273,6 +275,41 @@ try {
       if (!(age>=0 && age<120000)) process.exitCode=1;
       break;
     }
+    case "strategy-fundamentals": {
+      if (fake) throw Error("SEC disabilitata in modalità finta. Usare le fixture offline.");
+      const {secData,fundamentals,issuers}=await import("./edgar");
+      const symbol=flags[0] as keyof typeof issuers;
+      console.log(JSON.stringify(fundamentals(symbol,await secData(state,symbol,true),new Date()),null,2));
+      break;
+    }
+    case "strategy-backtest": {
+      const [path,strategy,runs,seed,cost]=flags;
+      const {replay}=await import("./replay");
+      console.log(JSON.stringify(replay(await Bun.file(path).json(),strategy as "orb"|"resistance",Number(runs??1000),Number(seed??12345),Number(cost??5)),null,2));
+      break;
+    }
+    case "strategy-performance": {
+      const rows=(await state.intents()).filter(i=>i.plan);
+      console.log(JSON.stringify(await Promise.all(rows.map(async i=>({strategy:i.plan!.strategy,id:i.id,
+        requested:i.order.qty,status:i.observed?.status??"non verificato",filled:i.observed?.filled_qty??null,
+        theoreticalRiskUSD:(i.plan!.entry-i.plan!.stop)*i.order.qty}))),null,2));
+      break;
+    }
+    case "order-pending": {
+      for(const file of await state.list("approvals")){
+        const item=await state.read<{ticket:string;expires:number}>("approvals/"+file);
+        if(item && item.expires>Date.now()) console.log(file.slice(0,-5),item.ticket);
+      }
+      break;
+    }
+    case "order-approve": {
+      const key=flags.find(s=>/^[0-9a-f]{64}$/.test(s));
+      if(!key || process.env.TRADINGSIM_EXECUTION_MODE!=="approval-required") throw Error("Autorizzazione non valida");
+      const item=await state.read<{expires:number}>("approvals/"+key+".json");
+      if(!item || !(Date.now()<item.expires)) throw Error("Proposta assente o scaduta");
+      await state.write("permissions/"+key+".json",{at:new Date().toISOString()},true);
+      break;
+    }
     case "api-usage": console.log(JSON.stringify(await freeUsage(state),null,2)); break;
     case "monitor-check": {
       if (fake) throw new Error("Usa bun test per le verifiche offline dei provider.");
@@ -342,7 +379,9 @@ try {
       try {
         if (!scanAt || +now - Date.parse(scanAt) >= 15 * 60_000) {
           const source = fake ? async (item: { symbol: string }) => ({ ...fakeCharts(now)[0], symbol: item.symbol }) : readSeries;
-          const result = await measureFeed("discovery", () => scan(now, source));
+          const saved = await state.read<CloseSchedule>(closeCalendar);
+          const session = saved?.date === newYork(now).date ? saved.session ?? undefined : undefined;
+          const result = await measureFeed("discovery", () => scan(now, source, session));
           await engine.collect(result, (await market.cachedNews(state)).articles, now);
         }
         // Anche con una revisione operatore in attesa, il controllo dovuto ha priorità.
@@ -355,7 +394,17 @@ try {
     }
     case "_gold": await goldBriefing(state, new Date(), fake, opts.redact); break;
     case "_close": await dailyClose(state, paper(), new Date(), opts.redact); break;
-    case "_orders": await pollOrders(state, paper(), opts.redact); break;
+    case "_orders": {
+      await pollOrders(state, paper(), opts.redact);
+      if(executionMode()!=="legacy" && (await state.intents()).some(i=>i.plan))
+        await child("run.guard","_exits",mode).exited;
+      break;
+    }
+    case "_exits": {
+      const model=measureAgents("strategy-exits",fake?new FakeAgents():new CodexAgents(opts.redact));
+      await manageBrackets(state,paper(),model.agents).finally(model.log);
+      break;
+    }
     case "_flush": await flushNotifications(state, channel, opts.redact); break;
     case "_run": {
       if (!scheduledDate || !slots.includes(rawSlot as Slot)) throw new Error("Sveglia interna non valida.");
