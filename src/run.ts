@@ -1,6 +1,10 @@
 import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAnalysis } from "./agents";
 import { FakeBroker, type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
 import { measureAgents, measureFeed } from "./efficiency-metrics";
+import { analyzeWakeNews, verifyEvents } from "./event-news";
+import { briefingSession, describeSession, sessionCandles } from "./market-session";
+import { paperAccount } from "./paper-summary";
+import { technicalDetails } from "./technical-report";
 import { chartContext } from "./indicators";
 import { orderReviewContext } from "./order-review-context";
 import { chartScenarios } from "./chart-scenarios";
@@ -11,7 +15,7 @@ import { miniChart, type Market, type News, type Series } from "./market";
 import { limitFor, risk, stops, terminal, ticketFor, trading } from "./risk";
 import { type Baton, type RunLock, State } from "./state";
 import { orderStatus, wakeReport } from "./wake-report";
-import { missed, nextWake, type Wake } from "./time";
+import { dateOffset, missed, newYork, nextWake, type Wake } from "./time";
 
 type Inputs = { state: State; broker: Broker; agents: Agents; market: Market; redact: (s: string) => string };
 
@@ -97,6 +101,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   let newsAnalysis: NewsAnalysis | undefined;
   let decision: Decision | undefined;
   let ordersVerified = false;
+  let accountError: string | undefined;
   let newsError: string | undefined;
 
   async function execute(order: Proposal, limit: number | null, approvalTicket?: string, mandatory = false) {
@@ -162,6 +167,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
 
   try { snapshot = await broker.snapshot(); }
   catch (error) {
+    accountError = errorText(error);
     reportIssue(`Conto, posizioni, ordini e orologio non verificati: ${errorText(error)}`);
   }
 
@@ -194,9 +200,31 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     })),
   };
   const chartInput = chartContext(charts, now);
+  const sessions = new Map<string, ReturnType<typeof sessionCandles>>();
+  const session: string[] = [];
+  if (entry.slot === "09:00") {
+    const day = newYork(now).date;
+    try {
+      const marketClock = snapshot?.clock ?? await broker.clock();
+      const info = briefingSession(await broker.calendar(dateOffset(day, -14), day), marketClock, now);
+      if (!info.previous) session.push(info.status + ". Ultima seduta regolare non verificabile.");
+      else session.push(`${info.status}. Ultima seduta completata: ${info.previous.date}.`);
+      for (const chart of charts.filter(item => item.source === "Alpaca IEX")) {
+        const data = sessionCandles(chart, info);
+        sessions.set(chart.symbol, data);
+        note(`${chart.symbol} (Alpaca IEX): ${describeSession(data)}`);
+        if (session.length <= 2 && ["SPY", "QQQ"].includes(chart.symbol)) session.push(`${chart.symbol}: ${describeSession(data)}`);
+      }
+    } catch (error) {
+      session.push(`Sessione USA non verificabile. ${errorText(error)}`);
+      note(session[0]);
+    }
+  }
   const analysts = await Promise.allSettled([
-    ask<Charts>(agents, "charts", chartInput),
-    ask<NewsAnalysis>(agents, "news", { now, news: newsInput, watched: monitored }),
+    ask<Charts>(agents, "charts", sessions.size ? {
+      ...chartInput, sessions: Object.fromEntries(sessions),
+    } : chartInput),
+    analyzeWakeNews(state, agents, now, newsInput, monitored, news?.articles),
   ]);
   if (analysts[0].status === "fulfilled") chartAnalysis = analysts[0].value;
   else {
@@ -210,6 +238,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   }
 
   for (const [index, series] of charts.entries()) {
+    if (sessions.has(series.symbol)) continue;
     if (series.source === "Alpaca IEX") {
       const { intervals } = chartInput.charts[index];
       const closed = snapshot?.clock.is_open === false;
@@ -237,21 +266,26 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       if (graph) note(`Chiusure ${series.symbol}, ${graph}`);
     }
   }
-  for (const idea of chartAnalysis?.ideas ?? []) {
-    if (charts.some(series => series.symbol === idea.symbol)) note(`${idea.symbol} (${idea.horizon}): ${idea.direction}. ${idea.evidence}. Invalidazione: ${idea.invalidation}. Incertezza: ${idea.uncertainty}.`);
-  }
+  const details = (chartAnalysis?.ideas ?? []).flatMap(idea => {
+    const series = charts.find(item => item.symbol === idea.symbol);
+    if (!series) return [];
+    note(`${idea.symbol} (${idea.horizon}): ${idea.direction}. ${idea.evidence}. Invalidazione proposta: ${idea.invalidation}. Incertezza: ${idea.uncertainty}.`);
+    const technical = technicalDetails(series, idea, now);
+    note(technical.full);
+    return [{ symbol: series.symbol, horizon: idea.horizon, ...technical }];
+  });
   for (const item of chartAnalysis?.limitations ?? []) note(item);
   for (const item of newsAnalysis?.limitations ?? []) note(item);
-  const verifiedEvents = (newsAnalysis?.events ?? []).filter(event =>
-    news?.articles.some(article => article.link === event.link && article.published === event.published && article.source === event.source));
+  const verifiedEvents = verifyEvents(newsAnalysis?.events ?? [], news?.articles ?? [], charts, now);
   for (const event of verifiedEvents) {
     const summary = `${event.classification}: ${event.title} (${event.symbols.join(", ")}). ${event.impact} — ${event.source}, ${event.published}, ${event.link}`;
-    note(summary);
-    await enqueue(state, entry.id, "notizia", redact(summary), JSON.stringify([event.link, event.published]));
+    const detail = `${summary} · ${event.effectiveDate ? "Evento " + event.effectiveDate + " · " : ""}${event.status}.${event.movement ? " " + event.movement : ""}`;
+    note(detail);
+    await enqueue(state, entry.id, "notizia", redact(detail), event.key);
   }
   const analysisCharts = chartAnalysis && { ...chartAnalysis, ideas: chartAnalysis.ideas.filter(idea => watched.includes(idea.symbol)).map(({ bias: _bias, ...idea }) => idea) };
   const analysisNews = newsAnalysis && { ...newsAnalysis, newMarkets: [],
-    events: newsAnalysis.events.filter(event => event.symbols.some(symbol => watched.includes(symbol))) };
+    events: verifiedEvents.filter(event => event.symbols.some(symbol => watched.includes(symbol))) };
   const context = { entry, account: snapshot?.account, positions: snapshot?.positions, recentOrders: snapshot?.orders.slice(0, 30),
     clock: snapshot?.clock, plan: previous?.planNext, pending: [...pending], analysisCharts, analysisNews, universe };
   if (snapshot && chartAnalysis && newsAnalysis) {
@@ -288,7 +322,10 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   }
   if (snapshot) {
     try { snapshot = await broker.snapshot(); ordersVerified = true; }
-    catch (error) { alerts.push(`Dati finali del conto indisponibili: ${errorText(error)}. Riporto lo snapshot iniziale.`); }
+    catch (error) {
+      accountError = errorText(error);
+      alerts.push(`Dati finali del conto indisponibili: ${accountError}. Riporto lo snapshot iniziale.`);
+    }
     note(`Conto: USD ${snapshot.account.equity}. P&L del giorno: USD ${(Number(snapshot.account.equity) - Number(snapshot.account.last_equity)).toFixed(2)}. Orologio (${brokerLabel}): ${snapshot.clock.timestamp}.`);
     for (const order of snapshot.orders.filter(x => lock.intents.includes(x.client_order_id))) {
       const status = observed(order, brokerLabel);
@@ -311,10 +348,8 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     ...alerts, ...[...pending].map(id => `Ricontrollare ${id} su Alpaca.`)].join("\n"));
   note(`Piano: ${toCheck.split("\n")[0]}\nProssima sveglia: ${nextWake(new Date(Math.max(+now, Date.now())))} (ora di Roma).`);
   for (const alert of alerts) note("⚠ " + alert);
-  const baton: Baton = { wake: entry, savedAt: new Date().toISOString(), planNext: toCheck, report: lines.join("\n"), pending: [...pending] };
-  const event = `${entry.id}-${crypto.randomUUID()}.json`;
-  await state.write(`history/${event}`, baton);
-  await state.write(`logs/${event}`, { run: entry.id, report: baton.report, alerts: alerts.map(redact) });
+
+
   let active = ordersVerified ? snapshot?.openOrders ?? snapshot?.orders : undefined;
   let activeError: string | undefined;
   if (!active) {
@@ -332,8 +367,21 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   if (entry.slot === "09:00") reasons.unshift("Briefing programmato, senza operazioni.");
   else if (snapshot?.clock.is_open === false) reasons.unshift("Alpaca indica mercato chiuso.");
   if (decision && !decision.orders.length) reasons.push(decision.reasoning);
-  const report = wakeReport({ entry, simulated, outcomes, reasons, active, activeError,
-    events: newsError ? [] : paperEvents, newsError, charts: chartAnalysis?.ideas ?? [] });
+  const submitted = new Set(outcomes.map(item => item.intent.order.symbol));
+  const proposed = new Set(decision?.orders.map(item => item.symbol));
+  const technical = [...details].sort((a, b) => Number(proposed.has(b.symbol)) - Number(proposed.has(a.symbol)))
+    .filter(item => !submitted.has(item.symbol) && universe.some(symbol => symbol === item.symbol))
+    .slice(0, 2).map(item => item.short);
+  const snapshotAge = Math.abs(Date.now() - Date.parse(snapshot?.clock.timestamp ?? ""));
+  const account = paperAccount(ordersVerified && snapshotAge <= 5 * 60_000 ? snapshot : undefined,
+    accountError ?? (ordersVerified ? "Timestamp Alpaca non recente." : undefined));
+  const report = wakeReport({ entry, simulated, outcomes, reasons, active, activeError, technical, session, account,
+    events: newsError ? [] : paperEvents, newsError, charts: details });
+  const baton: Baton = { wake: entry, savedAt: new Date().toISOString(), planNext: toCheck, report: lines.join("\n"),
+    pending: [...pending], summary: { reasons: reasons.map(redact), alerts: alerts.map(redact) } };
+  const event = `${entry.id}-${crypto.randomUUID()}.json`;
+  await state.write(`history/${event}`, baton);
+  await state.write(`logs/${event}`, { run: entry.id, report: baton.report, alerts: alerts.map(redact), technical: details.map(row => redact(row.full)) });
   await enqueue(state, entry.id, "resoconto", redact(report), entry.id, "wake-report");
   const scenarios = chartAnalysis && chartScenarios(chartAnalysis, charts, now);
   if (scenarios) await enqueue(state, entry.id, "scenario-grafici", redact(scenarios), entry.id);

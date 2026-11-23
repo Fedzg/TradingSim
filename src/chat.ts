@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { State } from "./state";
 
-type Kind = "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "scenario-grafici" | "ordine" | "allarmi" | "watchlist";
+type Kind = "chiusura" | "resoconto" | "mercato" | "notizia" | "notizia-operativa" | "scenario-grafici" | "ordine" | "allarmi" | "watchlist";
 export type Message = {
   id: string;
   text: string;
@@ -11,7 +11,7 @@ export type Message = {
   attempts?: number;
   error?: string;
   partsSent?: number;
-  notification?: "order" | "watchlist-addition" | "wake-report";
+  notification?: "order" | "watchlist-addition" | "wake-report" | "daily-close";
   retryAt?: string;
 };
 export interface Channel { send(message: Message, checkpoint: (partsSent: number) => Promise<void>): Promise<void> }
@@ -40,7 +40,7 @@ export async function enqueue(state: State, run: string, kind: Kind, content: st
     : outboxId(kind, dedupeKey);
   const path = `outbox/${id}.json`;
   if (dedupeKey !== undefined && await state.read<Message>(path)) return;
-  await state.write(path, { id, kind, text: notification === "wake-report" ? content : `run ${run}\n${content}`, queuedAt: new Date().toISOString(), notification }, dedupeKey !== undefined);
+  await state.write(path, { id, kind, text: (notification === "wake-report" || notification === "daily-close") ? content : `run ${run}\n${content}`, queuedAt: new Date().toISOString(), notification }, dedupeKey !== undefined);
 }
 
 export async function flush(state: State, channel: Channel, now?: Date, select?: (message: Message) => Promise<Message | undefined>) {

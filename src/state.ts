@@ -4,7 +4,7 @@ import type { Wake } from "./time";
 import { slots, wake } from "./time";
 import type { Intent } from "./broker";
 
-export type Baton = { wake: Wake; savedAt: string; planNext: string; report: string; pending: string[] };
+export type Baton = { wake: Wake; savedAt: string; planNext: string; report: string; pending: string[]; summary?: { reasons: string[]; alerts: string[] } };
 export type RunLock = { wake: Wake; pid: number; startedAt: string; intents: string[] };
 
 export class State {

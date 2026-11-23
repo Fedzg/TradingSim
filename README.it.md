@@ -33,7 +33,12 @@ automatico. Se il broker non rende l'esito verificabile, controlla il registro
 
 Telegram invia un riepilogo per sveglia anche senza operazioni, oltre agli
 aggiornamenti degli ordini Paper e alle aggiunte salvate nella watchlist.
-Il riepilogo include gli ordini attivi e fino a tre notizie pertinenti.
+Il riepilogo include il conto Paper verificato, gli ordini attivi e fino a
+tre notizie pertinenti. Nel briefing delle 09:00 il calendario e l’orologio
+Alpaca distinguono la seduta regolare precedente dal premarket disponibile.
+Cinque minuti dopo la chiusura regolare indicata da Alpaca, TradingSim
+riepiloga gli eseguiti e le decisioni già salvate. L’orario di questo
+riepilogo varia con le chiusure anticipate e con l’ora legale.
 I grafici completi e gli altri messaggi in coda restano consultabili
 localmente. Lo stato e il testimone sono visibili con `bun run status`,
 i resoconti completi sono in `state/history/` e i log in `state/logs/`.

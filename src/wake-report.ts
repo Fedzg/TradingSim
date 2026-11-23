@@ -1,6 +1,7 @@
-import type { Charts, NewsAnalysis } from "./agents";
+import type { Charts } from "./agents";
 import type { BrokerOrder, Intent } from "./broker";
 import { terminal } from "./risk";
+import type { verifyEvents } from "./event-news";
 import type { Wake } from "./time";
 
 const states = new Map([
@@ -12,7 +13,8 @@ const states = new Map([
 
 export const orderStatus = (status: string) => states.get(status) ?? status;
 
-type Event = NewsAnalysis["events"][number];
+type Technical = { symbol: string; horizon: Charts["ideas"][number]["horizon"]; short: string };
+type Event = ReturnType<typeof verifyEvents>[number];
 type Outcome = { intent: Intent; observed?: BrokerOrder };
 type Report = {
   entry: Wake;
@@ -23,7 +25,10 @@ type Report = {
   activeError?: string;
   events: Event[];
   newsError?: string;
-  charts: Charts["ideas"];
+  charts: Technical[];
+  technical: string[];
+  session: string[];
+  account: string[];
 };
 
 const short = (value: string, limit: number) => {
@@ -36,7 +41,7 @@ const side = (value: BrokerOrder["side"]) => value === "buy" ? "Acquisto" : "Ven
 const quantity = new Intl.NumberFormat("it-IT", { maximumFractionDigits: 9 });
 const show = (value: number | string) => quantity.format(Number(value));
 
-function execution({ intent, observed }: Outcome, charts: Charts["ideas"], events: Event[]) {
+function execution({ intent, observed }: Outcome, charts: Technical[], events: Event[]) {
   const { symbol, side: action, qty, reason } = intent.order;
   const order = observed?.symbol === symbol && observed.side === action ? observed : undefined;
   const filled = Number(order?.filled_qty);
@@ -50,12 +55,12 @@ function execution({ intent, observed }: Outcome, charts: Charts["ideas"], event
     `• ${symbol} · ${side(action)} · richieste ${show(qty)} · ${status}, ${fill}`,
     `  Motivo: ${short(reason, 240)}`,
     ...(intent.submissionRejection ? [`  ${short(intent.submissionRejection, 180)}`] : []),
-    ...(chart ? [`  Grafico (${chart.horizon}): ${short(chart.evidence, 115)}`] : []),
+    ...(chart ? [`  Grafico (${chart.horizon}): ${short(chart.short, 200)}`] : []),
     ...(news ? [`  Notizia pertinente: ${short(news.title, 105)}`] : []),
   ];
 }
 
-export function wakeReport({ entry, simulated, outcomes, reasons, active, activeError, events, newsError, charts }: Report) {
+export function wakeReport({ entry, simulated, outcomes, reasons, active, activeError, events, newsError, charts, technical, session, account }: Report) {
   const details = [...new Set(reasons)].slice(0, 4).map(reason => `• ${short(reason, 260)}`);
   const open = active?.filter(order => !terminal.has(order.status));
   const [year, month, day] = entry.date.split("-");
@@ -68,6 +73,11 @@ export function wakeReport({ entry, simulated, outcomes, reasons, active, active
       ...(details.length ? details :
         ["Motivo preciso non disponibile."]),
     ]),
+    "",
+    ...(session.length ? ["Sessione USA", ...session, ""] : []),
+    ...(technical.length ? ["Segnali da monitorare", ...technical.map(text => "• " + short(text, 280)), ""] : []),
+    "Conto Paper",
+    ...account,
     "",
     "Ordini Paper attivi",
     ...(open === undefined ? [`Ordini attivi non verificabili.${activeError ? ` ${short(activeError, 240)}` : ""}`] :
@@ -82,7 +92,9 @@ export function wakeReport({ entry, simulated, outcomes, reasons, active, active
     ...(newsError ? [`Notizie non verificabili. ${short(newsError, 240)}`] :
       events.length === 0 ? ["Nessuna notizia rilevante."] : events.slice(0, 3).flatMap(item => [
         `• ${short(item.title, 160)} (${item.symbols.join(", ")})`,
+        `  Pubblicazione ${item.published} · ${item.effectiveDate ? "evento " + item.effectiveDate + " · " : ""}${item.status}`,
         `  ${short(item.impact, 200)}`,
+        ...(item.movement ? [`  ${short(item.movement, 250)}`] : []),
         `  ${item.link}`,
       ])),
   ].join("\n");

@@ -401,7 +401,8 @@ for (const field of ["events", "newMarkets"] as const) {
   test(`Audit news limite risposta ${field}`, async () => {
     const { ask } = await import("../src/agents");
     const event = { title: "Dato", source: "Fonte", link: "https://example.org", published: now.toISOString(),
-      symbols: ["SPY"], impact: "Impatto.", classification: "fatto" };
+      symbols: ["SPY"], impact: "Impatto.", classification: "fatto", effectiveDate: "sconosciuta", dateQuote: "sconosciuta",
+      eventType: "macro", subject: "Dato", update: "no" };
     const market = { name: "SPY", symbol: "SPY", event: "Dato", link: event.link, source: event.source,
       published: event.published, reason: "Motivo." };
     const limit = field === "events" ? 6 : 2;

@@ -44,7 +44,12 @@ insufficient discovery feeds. A functioning feed depends on the deployment
 network and provider access.
 
 Telegram sends a summary for every wake-up, even when no order is sent.
-It includes open Paper orders and up to three relevant news items.
+It includes the verified Paper account, open orders, and up to three
+relevant news items. The 09:00 briefing uses Alpaca’s calendar and clock to
+distinguish the previous regular session from any available premarket data.
+Five minutes after Alpaca’s scheduled regular close, TradingSim summarizes
+fills and decisions already recorded. Early closes and daylight saving time
+can shift the time of the closing report.
 Confirmed order updates and saved watchlist additions still arrive
 separately. Full reports and charts remain in local state. See the
 [watchlist commands](deploy/README.en.md#watchlist-permission-and-review)

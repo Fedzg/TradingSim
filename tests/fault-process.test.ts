@@ -424,7 +424,7 @@ for (const [fault, expected, notifications] of [
   ["wake-buy-filled", ["inviato · eseguito, acquistato: 2", "Trend di prova.", "Grafico (giornaliero)"], 2],
   ["news-feed", ["Notizie non verificabili.", "Feed finto indisponibile"], 1],
   ["open", ["Ordini attivi non verificabili.", "get_orders (open)"], 1],
-  ["account-error", ["get_account_info", "QQQ · Vendita · accettato", "eseguite 1, residue 2", "stop 95"], 1],
+  ["account-error", ["Conto Paper non verificabile", "get_account_info", "QQQ · Vendita · accettato", "eseguite 1, residue 2", "stop 95"], 1],
 ] as const) {
   test(`Resoconto Telegram fake ${fault}`, async () => {
     const f = await fixture();

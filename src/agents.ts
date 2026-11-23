@@ -17,7 +17,8 @@ const discoveryFinding = obj({ verdict: choice("approve", "reject"), reason: s, 
 const schemas = {
   charts: obj({ ideas: arr(obj({ symbol: s, horizon: choice("15 minuti", "giornaliero"),
     bias: choice("rialzista", "ribassista", "laterale"), direction: s, evidence: s, invalidation: s, uncertainty: s })), limitations: arr(s) }),
-  news: obj({ events: arr(obj({ title: s, source: s, link: s, published: s, symbols: arr(s), impact: s, classification: choice("fatto", "indiscrezione", "interpretazione") }), 6),
+  news: obj({ events: arr(obj({ title: s, source: s, link: s, published: s, symbols: arr(s), impact: s, classification: choice("fatto", "indiscrezione", "interpretazione"),
+    effectiveDate: s, dateQuote: s, eventType: s, subject: s, update: choice("sì", "no") }), 6),
     limitations: arr(s), newMarkets: arr(obj({ name: s, symbol: s, event: s, link: s, source: s, published: s, reason: s }), 2) }),
   newsSignals: obj({ signals: arr(obj({ articleId: qty, symbols: arr(s), reason: s })) }),
   discoveryNews: discoveryFinding,
@@ -36,15 +37,16 @@ const scanRoles = new Set<Role>(["newsSignals", "discoveryNews", "discoveryChart
 export type Decision = { orders: Proposal[]; reasoning: string; planNext: string };
 export type Charts = { ideas: { symbol: string; horizon: "15 minuti" | "giornaliero"; bias: "rialzista" | "ribassista" | "laterale";
   direction: string; evidence: string; invalidation: string; uncertainty: string }[]; limitations: string[] };
-export type NewsAnalysis = { events: { title: string; source: string; link: string; published: string; symbols: string[]; impact: string; classification: string }[];
+export type NewsAnalysis = { events: { title: string; source: string; link: string; published: string; symbols: string[]; impact: string; classification: string;
+  effectiveDate: string; dateQuote: string; eventType: string; subject: string; update: "sì" | "no" }[];
   limitations: string[]; newMarkets: { name: string; symbol: string; event: string; link: string; source: string; published: string; reason: string }[] };
 export type NewsSignals = { signals: { articleId: number; symbols: string[]; reason: string }[] };
 type Review = { verdict: "approve" | "reject"; reason: string };
 export type Approval = { ticket: string; review: Review };
 
 const instructions: Record<Role, string> = {
-  charts: "Sei l’analista dei grafici. Usa gli indicatori calcolati e le candele chiuse; i campi null sono lacune. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Per ogni scenario seleziona un solo intervallo e un bias: rialzista o ribassista solo con evidenza nei dati; usa laterale quando il quadro è indeciso. Indica il motivo tecnico, un livello di invalidazione e le principali incertezze. Segnala ritardi e dati insufficienti. Evita probabilità numeriche e raccomandazioni. Analizza anche gli strumenti solo in monitoraggio.",
-  news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Restituisci al massimo 6 eventi pertinenti (events) e 2 nuovi mercati motivati (newMarkets). Usa una sola frase breve per ciascun impatto (impact) e ciascun motivo (reason). Usa array vuoti se non emerge nulla di rilevante. Segnala brevemente dati vecchi e lacune.",
+  charts: "Sei l’analista dei grafici. Usa gli indicatori calcolati e le candele chiuse; i campi null sono lacune. Confronta trend su più intervalli, medie mobili, supporti, resistenze, RSI, volatilità e volumi. Per ogni scenario seleziona un solo intervallo e un bias: rialzista o ribassista solo con evidenza nei dati; usa laterale quando il quadro è indeciso. Indica il motivo tecnico, un livello di invalidazione e le principali incertezze. Rispetta le etichette di sessione del briefing. Non trattare una candela regolare dell’ultima seduta attesa come guasto. Usa solo prezzi e livelli presenti nei dati. Segnala ritardi e dati insufficienti. Evita probabilità numeriche e raccomandazioni. Analizza anche gli strumenti solo in monitoraggio.",
+  news: "Sei l’analista delle notizie. Individua eventi aziendali, macro, banche centrali e petrolio. Usa solo fonti e timestamp forniti. Non inventare notizie. Restituisci al massimo 6 eventi pertinenti (events) e 2 nuovi mercati motivati (newMarkets). Usa una sola frase breve per ciascun impatto (impact) e ciascun motivo (reason). Usa array vuoti se non emerge nulla di rilevante. Segnala brevemente dati vecchi e lacune. Per ogni evento, effectiveDate è YYYY-MM-DD solo con data esplicita riferita all’evento nel titolo o riassunto e dateQuote è la citazione letterale della frase che la attesta. Se manca, usa sconosciuta per entrambi. Usa eventType e subject concisi e stabili fra fonti equivalenti (tipologia e società o identità concreta dell’evento). Indica update=sì solo per un fatto nuovo che aggiorna un evento precedente. Non attribuire movimenti di mercato all’evento.",
   newsSignals: "Seleziona al massimo tre notizie che potrebbero cambiare materialmente la valutazione di un ordine simulato. Cerca fatti specifici e nuovi come risultati, guidance, eventi regolatori, decisioni delle banche centrali o dati macro a sorpresa. Scarta indiscrezioni, commenti, resoconti del movimento del prezzo e collegamenti generici ai ticker. Usa solo gli articleId e i simboli consentiti dell’articolo. Spiega in una frase il nesso con gli strumenti selezionati e l’eventuale incertezza. Non suggerire ordini. Restituisci signals vuoto se nessuna notizia supera questa soglia.",
   discoveryNews: "Sei l’analista delle notizie per la watchlist. Verifica corrispondenza esatta dello strumento, fonte, data e rilevanza. Distingui una notizia verificabile da un semplice movimento di mercato. Puoi confermare un candidato privo di notizie solo se la fonte di mercato identifica chiaramente lo strumento e il movimento è rilevante. Non inventare un catalizzatore. Cita solo sourceIds forniti.",
   discoveryCharts: "Sei l’analista dei grafici per la watchlist. Verifica direzione, coerenza fra 60 minuti e giornaliero, ritardo, volume o sua assenza e invalidazione. Evidenzia se si tratta del sottostante, di un contratto o di una serie continua. Cita solo sourceIds forniti.",
@@ -52,7 +54,7 @@ const instructions: Record<Role, string> = {
   discoveryNewsAnswer: "Analista notizie. Rispondi alla domanda del revisore con fonti verificabili. Se le notizie non sono attuali o riguardano un altro strumento, dillo e ritira la tesi quando necessario.",
   discoveryChartsAnswer: "Analista grafici. Rispondi alla domanda del revisore con dati attuali. Verifica il segnale e la serie contro il confronto indipendente e segnala differenze di mercato, contratto e orario.",
   discoveryReview: "Revisore indipendente. Decidi dopo le due risposte. Approva solo se i dati aggiornati e il confronto indipendente reggono all’obiezione. Cita gli ID delle fonti e spiega il motivo finale di monitoraggio.",
-  decide: "Sei il decisore. Proponi al massimo cinque ordini in azioni intere o nessun ordine. Motiva in 3–5 frasi anche l’assenza di ordini. Compila il piano per la prossima sveglia. Rispetta universo e limiti del conto.",
+  decide: "Sei il decisore. Proponi al massimo cinque ordini in azioni intere o nessun ordine. Motiva in 3–5 frasi anche l’assenza di ordini. Compila il piano per la prossima sveglia. Rispetta universo e limiti del conto. Spiega il motivo concreto di una mancata operazione con i dati disponibili. Usa solo prezzi, livelli e timestamp verificabili. Escludi probabilità inventate e distingui gli eventi storici o non databili dalle novità.",
   challenge: "Sei il revisore indipendente e severo. Cerca prove contrarie e formula quattro domande specifiche su momento, invalidazione, quantità e scenario avverso per l’ordine immutabile.",
   answer: "Sei il decisore. Rispondi alle quattro obiezioni. Conferma integralmente l’ordine immutabile o ritiralo. Per variarlo occorre una nuova proposta e una nuova revisione.",
   review: "Sei il revisore indipendente. Valuta domanda, risposta, prove contrarie e condizioni esatte. Emetti approve solo se la tesi e la quantità rimangono solide. In caso di dubbio, reject.",
@@ -173,7 +175,8 @@ export class FakeAgents implements Agents {
       case "news": {
         const articles = (input as { news?: News } | undefined)?.news?.articles ?? [];
         return { events: articles.slice(0, 6).map(article => ({ title: article.title, source: article.source, link: article.link,
-          published: article.published, symbols: article.symbols, impact: "Impatto macro simulato.", classification: "interpretazione" })),
+          published: article.published, symbols: article.symbols, impact: "Impatto macro simulato.", classification: "interpretazione",
+          effectiveDate: "sconosciuta", dateQuote: "sconosciuta", eventType: "macro", subject: article.title, update: "no" })),
           limitations: [], newMarkets: [] };
       }
       case "decide": return this.decision;

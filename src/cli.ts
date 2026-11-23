@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { config } from "./config";
 import { Alpaca, FakeBroker } from "./broker";
 import { ask, CodexAgents, FakeAgents, type Charts } from "./agents";
+import { closeCalendar, closeDue, closeReportId, dailyClose, type CloseSchedule } from "./daily-close";
 import { Discovery, savedWatchlist } from "./discovery";
 import { measureAgents, measureFeed } from "./efficiency-metrics";
 import { chartContext } from "./indicators";
@@ -15,7 +16,7 @@ import { queueNewsSignals } from "./news-signals";
 import { run } from "./run";
 import { State } from "./state";
 import { TelegramChannel } from "./telegram";
-import { nextWake, rome, slots, wake, type Slot } from "./time";
+import { newYork, nextWake, rome, slots, wake, type Slot } from "./time";
 
 const bun = process.execPath;
 const script = import.meta.path;
@@ -105,6 +106,8 @@ async function schedule() {
   let discovering = false;
   let polling = false;
   let lastOrders = 0;
+  let lastCloseCheck = 0;
+  let closing = false;
   const jobs = new Set<ReturnType<typeof child>>();
   let stopping = false;
   function background(lock: string, command: string) {
@@ -114,7 +117,8 @@ async function schedule() {
       jobs.delete(proc);
       if (command === "_discover") discovering = false;
       if (command === "_orders") polling = false;
-      if ((command === "_orders" || command === "_discover") && !stopping) background("outbox.guard", "_flush");
+      if (command === "_close") closing = false;
+      if ((command === "_orders" || command === "_discover" || command === "_close") && !stopping) background("outbox.guard", "_flush");
     });
   }
   let wakeUp: (() => void) | undefined;
@@ -154,6 +158,16 @@ async function schedule() {
         lastOrders = +now;
         polling = true;
         background("orders.guard", "_orders");
+      }
+      if (!closing && +now - lastCloseCheck >= 60_000) {
+        lastCloseCheck = +now;
+        const day = newYork(now);
+        const saved = await state.read<CloseSchedule>(closeCalendar);
+        const due = saved?.date === day.date ? saved.session && closeDue(saved.session, now) : day.time >= "09:00";
+        if (due && !await state.read(`outbox/${closeReportId(day.date)}.json`)) {
+          closing = true;
+          background("close.guard", "_close");
+        }
       }
       if (+now - lastChecked >= interval) {
         lastChecked = +now;
@@ -277,6 +291,7 @@ try {
       }
       break;
     }
+    case "_close": await dailyClose(state, paper(), new Date(), opts.redact); break;
     case "_orders": await pollOrders(state, paper(), opts.redact); break;
     case "_flush": await flushNotifications(state, channel, opts.redact); break;
     case "_run": {
