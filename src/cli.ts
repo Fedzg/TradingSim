@@ -6,7 +6,7 @@ import { closeCalendar, closeDue, closeReportId, dailyClose, type CloseSchedule 
 import { Discovery, savedWatchlist } from "./discovery";
 import { measureAgents, measureFeed } from "./efficiency-metrics";
 import { chartContext } from "./indicators";
-import { freeUsage } from "./provider-cache";
+import { freeUsage,httpStatus } from "./provider-cache";
 import { MonitorFeeds } from "./monitor-feeds";
 import { catalog, scan } from "./discovery-sources";
 import { chartScenarios } from "./chart-scenarios";
@@ -119,7 +119,9 @@ async function schedule() {
   function background(lock: string, command: string) {
     const proc = child(lock, command, mode);
     jobs.add(proc);
-    void proc.exited.then(() => {
+    const launch=rome(new Date());
+    void proc.exited.then(async code => {
+      if(command==="_gold") await state.write("health/1230.json",{date:launch.date,slot:"12:30",code,at:new Date().toISOString()});
       jobs.delete(proc);
       if (command === "_discover") discovering = false;
       if (command === "_orders") polling = false;
@@ -141,6 +143,7 @@ async function schedule() {
     const now = new Date();
     const { date, time } = rome(now);
     try {
+      await state.write("health/cycle.json",{at:now.toISOString()});
       if (slots.includes(time as Slot) && !active && lastLaunch !== date + time) {
         const prior = await state.baton();
         const entry = wake(date, time as Slot);
@@ -148,7 +151,10 @@ async function schedule() {
           const proc = child("run.guard", "_run", [...mode, "--slot", time, "--date", date]);
           active = proc;
           lastLaunch = date + time;
-          void proc.exited.then(code => {
+          void proc.exited.then(async code => {
+            const latest=await state.baton();
+            await state.write("health/"+time.replace(":","")+".json",{date,slot:time,code,at:new Date().toISOString(),
+              outcome:latest.baton?.wake.id===entry.id ? latest.baton.summary : undefined});
             console.log(`Sveglia ${entry.id}: processo terminato (codice ${code}).`);
             if (code === 75) lastLaunch = "";
             active = undefined;
@@ -257,6 +263,16 @@ try {
       console.log(opts.redact(JSON.stringify({ scanAt, coverage, watchlist: await savedWatchlist(state), revisioni }, null, 2)));
       break;
     }
+    case "healthcheck": {
+      const cycle=await state.read<{at:string}>("health/cycle.json");
+      const wakes=await Promise.all(scheduledSlots.map(async slot=>({slot,last:await state.read("health/"+slot.replace(":","")+".json")??null})));
+      const closes=(await state.list("outbox")).filter(name=>name.startsWith("chiusura-"));
+      const closeTimes=await Promise.all(closes.map(async file=>(await state.read<Message>("outbox/"+file))?.queuedAt??""));
+      console.log(JSON.stringify({cycle,wakes,news:(await market.cachedNews(state)).lastSuccess,close:closeTimes.sort().at(-1)??null}));
+      const age=Date.now()-Date.parse(cycle?.at??"");
+      if (!(age>=0 && age<120000)) process.exitCode=1;
+      break;
+    }
     case "api-usage": console.log(JSON.stringify(await freeUsage(state),null,2)); break;
     case "monitor-check": {
       if (fake) throw new Error("Usa bun test per le verifiche offline dei provider.");
@@ -264,17 +280,24 @@ try {
         const check=async (fn:()=>Promise<unknown>)=>{try {return !!await fn();} catch {return false;}};
         const direct=new MonitorFeeds(state,mcp,true,true);
         const alpaca=await check(()=>paper().account());
-        const twelve=await check(async()=> (await direct.forex("EUR/USD","15min",true)).length>0);
-        const gold=await check(async()=> (await direct.metal("XAU/USD")).provider==="goldApi.dev");
+        const codes:Record<string,number>={};
+        const fx=await httpStatus.run(code=>{codes.twelve=code},()=>direct.forex("EUR/USD","15min",true)).catch(()=>undefined);
+        const twelve=!!fx?.length;
+        const fxAt=fx?.at(-1)?.t;
+        const metal=await httpStatus.run(code=>{codes.gold=code},()=>direct.metal("XAU/USD")).catch(()=>undefined);
+        const gold=metal?.provider==="goldApi.dev";
+        const diagnostics=Object.fromEntries(Object.entries({alpaca:{ok:alpaca},twelve:{ok:twelve,at:fxAt},gold:{ok:gold,at:metal?.regularMarketTime?new Date(metal.regularMarketTime*1000).toISOString():null}})
+          .map(([k,v])=>[k,{connection:codes[k]?`HTTP ${codes[k]}`:v.ok?"riuscita":"non verificata",payload:v.ok?"valido":"non verificato",timestamp:("at" in v && v.at)||"non verificato"}]));
         const telegram=await check(async()=>{
           if (!opts.telegram) return false;
           const res=await fetch("https://api.telegram.org/bot"+opts.telegram.token+"/getChat",{
             method:"POST",redirect:"error",signal:AbortSignal.timeout(8000),
             body:new URLSearchParams({chat_id:opts.telegram.chatId})});
+          codes.telegram=res.status;
           const data=await res.json();
           return res.ok && data.ok===true && String(data.result?.id)===opts.telegram.chatId;
         });
-        console.log(JSON.stringify({alpaca,telegram,twelve,gold}));
+        console.log(JSON.stringify({alpaca,telegram,twelve,gold,diagnostics:{...diagnostics,telegram:{connection:codes.telegram?`HTTP ${codes.telegram}`:"non verificata",payload:telegram?"valido":"non verificato",timestamp:"non applicabile"}}}));
         break;
       }
       console.log(opts.redact((await buildGoldReport(state,new Date(),false)).text));

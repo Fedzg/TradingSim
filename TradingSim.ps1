@@ -179,7 +179,7 @@ function Verify {
         $script:stage='"$HOME/.local/share/tradingsim-build/'+$rev+'"'
         $arc=Join-Path ([IO.Path]::GetTempPath()) ("tradingsim-"+[guid]::NewGuid()+'.tar.gz')
         try {
-            $null=Native git @('archive','--format=tar.gz',("--output="+$arc),'HEAD','package.json','deploy/Dockerfile','src','tests')
+            $null=Native git @('archive','--format=tar.gz',("--output="+$arc),'HEAD','package.json','deploy/Dockerfile','deploy/start-worker.sh','src','tests')
             $null=RunRemote ('umask 077; mkdir -p '+$stage)
             $null=Native scp.exe ($sshArgs+@($arc,($target+':.local/share/tradingsim-build/'+$rev+'/source.tar.gz')))
             $null=RunRemote ('cd '+$stage+'; tar xzf source.tar.gz; docker build -f deploy/Dockerfile -t '+$image+' .')
@@ -195,16 +195,12 @@ function Verify {
         $null=Native docker @('run','--rm','--network','none','-v',((Join-Path $root 'tests')+':/app/tests:ro'),'--entrypoint','sh',$image,'-c',$probe)
     }
     $script:hint='Controllo di sola lettura fallito. Verificare rete HTTPS e disponibilità dei provider.'
-    $common=@('-e','ALPACA_PAPER_TRADE=true','-e','APCA_API_KEY_ID_FILE=/run/secrets/alpaca-key','-e','APCA_API_SECRET_KEY_FILE=/run/secrets/alpaca-secret')
+    $common=@('-e','ALPACA_PAPER_TRADE=true','-e','APCA_API_KEY_ID_FILE=/run/secrets/config/alpaca-key','-e','APCA_API_SECRET_KEY_FILE=/run/secrets/config/alpaca-secret')
     if ($board) {
-        $json=RunRemote ('cd '+$remoteDir+'; docker run --rm --tmpfs /var/lib/tradingsim -v tradingsim-preparazione-provider:/var/lib/tradingsim/state/providers -v "$PWD:/run/secrets:ro" --env-file telegram.env --env-file monitor.env '+($common -join ' ')+" $image monitor-check --setup")
+        $json=RunRemote ('cd '+$remoteDir+'; docker run --rm --tmpfs /var/lib/tradingsim -v tradingsim-preparazione-provider:/var/lib/tradingsim/state/providers -v "$PWD:/run/secrets/config:ro" '+($common -join ' ')+" $image monitor-check --setup")
     } else {
-        $stateVolume=$project+'_state'
-        $activeVolume=Native docker @('inspect','-f','{{range .Mounts}}{{if eq .Destination "/var/lib/tradingsim"}}{{.Name}}{{end}}{{end}}',$worker)
-        if ($activeVolume -ne $stateVolume) {throw 'Volume operativo inatteso.'}
-        $null=Native docker @('run','--rm','--network','none','-v',($stateVolume+':/data'),'--entrypoint','mkdir',$image,'-p','/data/state/providers')
-        $quotaMount="type=volume,src=$stateVolume,dst=/var/lib/tradingsim/state/providers,volume-subpath=state/providers"
-        $json=Native docker (@('run','--mount',$quotaMount,'--rm','--tmpfs','/var/lib/tradingsim','-v',($localDir+':/run/secrets:ro'),'--env-file',(Join-Path $localDir 'telegram.env'),'--env-file',(Join-Path $localDir 'monitor.env'))+$common+@($image,'monitor-check','--setup'))
+        $quotaMount="type=volume,src=tradingsim-verifica-provider,dst=/var/lib/tradingsim/state/providers"
+        $json=Native docker (@('run','--mount',$quotaMount,'--rm','--tmpfs','/var/lib/tradingsim','-v',($localDir+':/run/secrets/config:ro'))+$common+@($image,'monitor-check','--setup'))
     }
     return (($json -split '\r?\n')[-1] | ConvertFrom-Json)
 }
@@ -225,19 +221,48 @@ function UpdatePC {
         $value=Native docker @('exec',$worker,'printenv',$setting)
         [Environment]::SetEnvironmentVariable($setting,$value,'Process')
     }
+    if (!$liveDir) {throw 'Cartella operativa non verificata.'}
     $old=Native docker @('inspect','-f','{{.Image}}',$worker)
     $name=Native docker @('inspect','-f','{{.Config.Image}}',$worker)
-    $null=Native docker @('tag',$old,($project+':rollback-guidato'))
+    $oldCompose=Native docker @('inspect','-f','{{index .Config.Labels "com.docker.compose.project.config_files"}}',$worker)
+    if (!(Test-Path -LiteralPath $oldCompose -PathType Leaf)) {throw 'Conservare il checkout Compose precedente prima di procedere.'}
+    $backup=Join-Path $private ('backup-'+[guid]::NewGuid())
+    ProtectDir $backup
+    if ([IO.Path]::GetFullPath($oldCompose) -eq [IO.Path]::GetFullPath((Join-Path $root 'deploy/compose.yaml'))) {throw 'Per il rollback usare un checkout candidato separato dal precedente.'}
+    Copy-Item -LiteralPath $oldCompose -Destination (Join-Path $backup 'compose-precedente.yaml')
+    foreach ($file in 'alpaca-key','alpaca-secret','monitor.env','telegram.env') {
+        $from=Join-Path $liveDir $file
+        if (Test-Path -LiteralPath $from) {[IO.File]::WriteAllBytes((Join-Path $backup $file),[IO.File]::ReadAllBytes($from))}
+    }
+    $rollback=$project+':rollback-'+$old.Substring(7,12)
+    $null=Native docker @('tag',$old,$rollback)
+    if ((Native docker @('image','inspect','-f','{{.Id}}',$rollback)) -ne $old) {throw 'Digest rollback errato.'}
     $null=Native docker @('exec',$worker,'sh','-ec','cd /var/lib/tradingsim/state; test ! -e run.lock; for g in run orders gold; do flock -n "$g.guard" true; done')
-    $null=Native docker @('tag',$image,$name)
+    $null=Native docker @('stop','-t','90',$worker)
     try {
+        $manifest=@{image=$old;tag=$rollback;name=$name;compose=$oldCompose;project=$project;files=@{}}
+        foreach ($v in 'state','codex') {
+            $null=Native docker @('run','--rm','--network','none','-v',($project+'_'+$v+':/source:ro'),'-v',($backup+':/backup'),'--entrypoint','tar',$old,'-cpf',('/backup/'+$v+'.tar'),'-C','/source','.')
+            $manifest.files[$v]=(Get-FileHash -Algorithm SHA256 (Join-Path $backup ($v+'.tar'))).Hash
+        }
+        [IO.File]::WriteAllText((Join-Path $backup 'manifest.json'),($manifest | ConvertTo-Json),$utf8)
+        foreach ($file in 'alpaca-key','alpaca-secret','monitor.env','telegram.env') {
+            $from=Join-Path $localDir $file
+            if (Test-Path -LiteralPath $from) {[IO.File]::WriteAllBytes((Join-Path $liveDir $file),[IO.File]::ReadAllBytes($from))}
+        }
+        $null=Native docker @('tag',$image,$name)
         $null=Native docker ($compose+@('up','-d','--no-build','--force-recreate','worker'))
         $id=Native docker ($compose+@('ps','-q','--status','running','worker'))
         if ($id -notmatch '^[a-f0-9]+$') {throw 'Worker non avviato.'}
         if ((Native docker @('inspect','-f','{{.Image}}',$id)) -ne (Native docker @('image','inspect','-f','{{.Id}}',$image))) {throw 'Immagine inattesa.'}
     } catch {
+        foreach ($file in 'alpaca-key','alpaca-secret','monitor.env','telegram.env') {
+            $from=Join-Path $backup $file
+            if (Test-Path -LiteralPath $from) {[IO.File]::WriteAllBytes((Join-Path $liveDir $file),[IO.File]::ReadAllBytes($from))}
+            elseif (Test-Path -LiteralPath (Join-Path $liveDir $file)) {Remove-Item -LiteralPath (Join-Path $liveDir $file)}
+        }
         $null=Native docker @('tag',$old,$name)
-        $null=Native docker ($compose+@('up','-d','--no-build','--force-recreate','worker'))
+        $null=Native docker @('compose','-p',$project,'-f',$oldCompose,'up','-d','--no-build','--force-recreate','worker')
         throw 'Aggiornamento fallito. Ripristinata immagine precedente.'
     }
 }
@@ -302,7 +327,21 @@ function Draw {
                 $consent.Text='Autorizzo il trasferimento via SSH dei campi elencati'; $consent.AutoSize=$true; $panel.Controls.Add($consent)
             }
             Label "Gold: $template · X-API-Key"
-            Button 'Salva e continua' {
+            Button 'Prepara verifica' {
+                if ($board -and !$script:boardLive) {
+                    $script:boardLive=$remoteDir
+                    $script:remoteDir=$boardLive+'/.verify-'+[guid]::NewGuid()
+                    $null=RunRemote ('umask 077; mkdir -p '+$remoteDir+'; for f in alpaca-key alpaca-secret telegram.env monitor.env; do if test -f '+$boardLive+'/"$f"; then cp '+$boardLive+'/"$f" '+$remoteDir+'/"$f"; chmod 600 '+$remoteDir+'/"$f"; fi; done')
+                }
+                if (!$board -and !$script:liveDir) {
+                    $script:liveDir=$localDir
+                    $script:localDir=Join-Path $private ('verifica-'+[guid]::NewGuid())
+                    ProtectDir $localDir
+                    foreach ($file in 'alpaca-key','alpaca-secret','monitor.env','telegram.env') {
+                        $from=Join-Path $liveDir $file
+                        if (Test-Path -LiteralPath $from) {[IO.File]::WriteAllBytes((Join-Path $localDir $file),[IO.File]::ReadAllBytes($from))}
+                    }
+                }
                 if ($copyKeys.Count -and !$consent.Checked) {throw 'Conferma il trasferimento dei campi elencati.'}
                 foreach ($key in $inputs.Keys) {if (!$inputs[$key].Text.Trim()) {throw ('Compila '+$labels[$key])}}
                 foreach ($key in $copyKeys) {WriteValue $key (LocalValue $key)}
@@ -322,9 +361,17 @@ function Draw {
             foreach ($svc in $services.Keys) {
                 if ($result.$svc -is [bool] -and $result.$svc) {Label ($names[$svc]+' · Già configurato · lettura riuscita')}
                 else {Label ($names[$svc]+' · Verifica fallita'); $passed=$false}
+                $d=$result.diagnostics.$svc
+                if ($d) {Label ("Connessione "+$d.connection+" · payload "+$d.payload+" · timestamp "+$d.timestamp)}
             }
             if ($board) {
                 Label 'Preparazione sulla scheda. Il passaggio di servizio e la migrazione dei volumi richiedono una procedura successiva.'
+                if ($passed) {
+                    Button 'Salva configurazione verificata sulla scheda' {
+                        $null=RunRemote ('umask 077; for f in alpaca-key alpaca-secret telegram.env monitor.env; do install -m 600 '+$remoteDir+'/"$f" '+$boardLive+'/"$f"; done')
+                        Label 'Configurazione salvata. Scheduler spento.'
+                    }
+                }
                 Button 'Login ufficiale Codex sulla scheda' {
                     $cmd='docker run --rm -it --user 10001:10001 -v tradingsim_codex:/home/tradingsim-agent/.codex --entrypoint codex '+$image+' login --device-auth'
                     & ssh.exe @sshArgs -t $target $cmd
@@ -387,4 +434,9 @@ if ($ProvaOffline) {
     }
     $form.Close()
     Write-Output 'Percorsi Windows e KICKPI verificati con dati fittizi.'
-} else { [void]$form.ShowDialog() }
+} else {
+    try {[void]$form.ShowDialog()} finally {
+        if ($script:boardLive) {$null=RunRemote ('for f in alpaca-key alpaca-secret telegram.env monitor.env; do rm -f '+$remoteDir+'/"$f"; done; rmdir '+$remoteDir)}
+        if ($script:liveDir -and $localDir -like (Join-Path $private 'verifica-*')) {Remove-Item -LiteralPath $localDir -Recurse -Force}
+    }
+}

@@ -2,6 +2,16 @@ import { resolve } from "node:path";
 export const PAPER = "https://paper-api.alpaca.markets";
 const names = ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY"] as const;
 export async function config(fake: boolean) {
+  if (!fake) {
+    for (const name of ["monitor","telegram"]) {
+      const file=Bun.file("/run/secrets/config/"+name+".env");
+      if (!await file.exists()) continue;
+      const {parseEnv}=await import("node:util");
+      for (const [key,value] of Object.entries(parseEnv(await file.text()))) {
+        if (/^(TELEGRAM_(BOT_TOKEN|CHAT_ID)|TWELVE_DATA_(API_KEY|DAILY_LIMIT)|GOLDAPI_(KEY|DAILY_LIMIT|URL_TEMPLATE|AUTH_HEADER))$/.test(key)) process.env[key]??=value;
+      }
+    }
+  }
   const endpoint = process.env.APCA_API_BASE_URL;
   const paperFlag = process.env.ALPACA_PAPER_TRADE;
   if (paperFlag !== undefined && !["true", "1", "yes"].includes(paperFlag.toLowerCase())) {

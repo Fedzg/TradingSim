@@ -16,7 +16,7 @@ const minuteMs=60000, hourMs=3600000, dayMs=86400000;
 
 function accountHeaders(b:Budget, provider:string, headers:Headers, now:number, started:number) {
   // Twelve Data reports the credit weight of this request separately from the account balance.
-  const cost=Number(headers.get("api-credits-used"));
+  const cost=Number(headers.get("api-credits-request"));
   if (provider==="twelve" && Number.isSafeInteger(cost) && cost>1) {
     if (b.day===new Date(started).toISOString().slice(0,10)) b.daily+=cost-1;
     if (now-started<minuteMs) b.recent?.push(...Array(Math.min(cost-1,8)).fill(started));
@@ -27,7 +27,7 @@ function accountHeaders(b:Budget, provider:string, headers:Headers, now:number, 
     const limit=headers.get("x-ratelimit-limit-"+period) ?? (period==="hour"?headers.get("x-ratelimit-limit"):null);
     if (limit!==null && /^\d+$/.test(limit)) (b.limits??={})[period]=Number(limit);
     const raw=headers.get("x-ratelimit-remaining-"+period) ??
-      (period==="minute" ? headers.get("api-credits-left") : period==="hour" ? headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining") : null);
+      (period==="minute" ? (headers.get("api-credits-left") ?? (/^\d+$/.test(headers.get("api-credits-used")??"") ? String(Math.max(0,8-Number(headers.get("api-credits-used")))) : null)) : period==="hour" ? headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining") : null);
     if (raw===null || !/^\d+$/.test(raw)) continue;
     const until=period==="day" ? (Math.floor(now/dayMs)+1)*dayMs : now+(period==="minute"?minuteMs:hourMs);
     // Requests for this account are serialized, so the latest response can also report replenishment.
@@ -129,8 +129,10 @@ export async function freeUsage(state:State, now=Date.now()) {
       errors:b?.errors??0};
   }));
 }
+export const httpStatus = new AsyncLocalStorage<(code:number)=>void>();
 export async function publicResponse(url: URL, headers?: Record<string,string>) {
   const response = await fetch(url,{headers,signal:AbortSignal.timeout(8000),redirect:"error"});
+  httpStatus.getStore()?.(response.status);
   responseHeaders.getStore()?.(response.headers);
   if (!response.ok) {
     const retry = response.headers.get("retry-after") ?? "";

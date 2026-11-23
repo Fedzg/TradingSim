@@ -22,5 +22,7 @@ ENV TRADINGSIM_STATE_DIR=/var/lib/tradingsim \
     TRADINGSIM_CODEX_ISOLATE=1 \
     CODEX_HOME=/home/tradingsim-agent/.codex \
     HOME=/home/tradingsim-agent
-ENTRYPOINT ["bun", "src/cli.ts"]
+COPY --chmod=755 deploy/start-worker.sh /usr/local/bin/start-worker
+RUN install -d -o root -g root -m 0700 /run/secrets
+ENTRYPOINT ["/usr/local/bin/start-worker"]
 CMD ["schedule"]

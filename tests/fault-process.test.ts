@@ -216,7 +216,7 @@ test("G7b: risposta persa dopo accettazione, la parte non confermata può duplic
   const f = await fixture();
   await enqueue(f.state, "lost", "resoconto", "x".repeat(5100));
   expect((await f.driver("lost")).code).toBe(0);
-  expect((await f.messages())[0]).toMatchObject({ partsSent: 1 });
+  expect((await f.messages())[0]).toMatchObject({ partsSent: 1, error: expect.stringContaining("incerto") });
   expect((await f.messages())[0]?.delivered).toBeUndefined();
   expect((await f.driver("lost")).code).toBe(0);
   const requests = (await f.state.read<Send[]>("requests.json"))!;

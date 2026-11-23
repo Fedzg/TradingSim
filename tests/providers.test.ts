@@ -194,20 +194,16 @@ test("crediti consumati esternamente: header a zero blocca anche dopo il riavvio
   expect(calls).toBe(1);
   expect((await freeUsage(s))[0]).toMatchObject({sinceStart:1,providerRemaining:{minute:{left:0}}});
 });
-test("fallback spot: seleziona solo la coppia equivalente più recente e identifica il ritardo",async()=>{
-  const f=new MonitorFeeds(await state());
-  const now=new Date("2026-11-23T12:00:00Z"), ts=+now/1000;
-  const metal=spyOn(f,"metal").mockResolvedValue({symbol:"XAU/USD",provider:"goldApi.dev",currency:"USD",regularMarketPrice:30,regularMarketTime:ts-3600});
-  const fallback={symbol:"XAUUSD=X",currency:"USD",instrumentType:"CURRENCY",regularMarketPrice:31,regularMarketTime:ts-600,exchangeDataDelayedBy:10};
-  const yahoo=spyOn(f,"yahooQuote").mockResolvedValue(fallback);
-  const result=await f.spotQuote("XAU/USD",now);
-  expect(result.provider).toContain("fallback");expect(quoteQuality(result,now,900000)).toBe("ritardo 10 min");
-  yahoo.mockResolvedValue({...fallback,instrumentType:"FUTURE"});
+test("XAU usa solo il quote recente, XAG conserva la quotazione indicativa",async()=>{
+  const f=new MonitorFeeds(await state()), now=new Date();
+  const gold={symbol:"XAU/USD",provider:"Twelve Data · quote 1min",regularMarketPrice:2400,regularMarketTime:+now/1000};
+  const source=spyOn(f,"goldMinute").mockResolvedValue(gold);
+  spyOn(f,"metal").mockImplementation(async symbol=>({...gold,symbol,provider:"goldApi.dev",regularMarketTime:0}));
+  expect((await f.spotQuote("XAU/USD",now)).provider).toContain("Twelve");
+  source.mockResolvedValue({...gold,regularMarketTime:+now/1000-86400});
   expect((await f.spotQuote("XAU/USD",now)).provider).toBe("goldApi.dev");
-  metal.mockResolvedValue({...fallback,symbol:"XAU/USD",provider:"goldApi.dev",regularMarketTime:ts-10});
-  expect((await f.spotQuote("XAU/USD",now)).provider).toBe("goldApi.dev");
-  expect(yahoo).toHaveBeenCalledTimes(2);
-  await expect(f.spotQuote("Gold CFD",now)).rejects.toThrow();
+  expect((await f.spotQuote("XAG/USD",now)).regularMarketTime).toBe(0);
+  expect(source).toHaveBeenCalledTimes(2);
 });
 test("chiusura weekend: usa la cache scaduta senza richieste ai provider",async()=>{
   setSystemTime(new Date("2026-11-20T16:00:00Z"));
@@ -224,7 +220,7 @@ test("chiusura weekend: usa la cache scaduta senza richieste ai provider",async(
 });
 test("Twelve Data contabilizza il peso indicato nella risposta",async()=>{
   const s=await state();
-  http(()=>new Response("ok",{headers:{"api-credits-used":"3","api-credits-left":"5"}}));
+  http(()=>new Response("ok",{headers:{"api-credits-request":"3","api-credits-left":"5"}}));
   await cached(s,"twelve","fixture",1000,async()=>(await publicResponse(new URL("https://example.test/fixture"))).text());
   expect((await freeUsage(s))[0]).toMatchObject({sinceStart:1,todayUTC:3,windowUnits:3});
 });
@@ -267,4 +263,24 @@ test("goldApi.dev updatedAt data la risposta, non il prezzo spot",async()=>{
   expect(quote.responseAt).toBe("2026-11-23T13:00:00.000Z");
   expect(quote.regularMarketTime).toBe(0);
   expect(quoteQuality(quote,new Date(),900000)).toContain("non verificabile");
+});
+
+test("costo Twelve distinto dal totale progressivo del minuto",async()=>{
+  const s=await state(); let n=0;
+  http(()=>new Response("ok",{headers:++n===4?{}:{"api-credits-request":"1","api-credits-used":String(n),"api-credits-left":String(8-n)}}));
+  for(let i=0;i<4;i++) {
+    await cached(s,"twelve",String(i),100,async()=>(await publicResponse(new URL("https://example.test/"))).text());
+    if (i===2) expect((await freeUsage(s))[0].todayUTC).toBe(3);
+  }
+  expect((await freeUsage(s))[0]).toMatchObject({sinceStart:4,todayUTC:4,windowUnits:4});
+});
+test("un HTTP 429 con Retry-After sospende anche un'altra chiave di cache",async()=>{
+  const s=await state(); let calls=0;
+  http(()=>{calls++;return new Response(null,{status:429,headers:{"Retry-After":"180"}})});
+  const start=Date.now();
+  const read=(key:string)=>cached(s,"twelve",key,60000,()=>publicResponse(new URL("https://example.test/fixture")));
+  await expect(read("a")).rejects.toThrow("429");
+  await expect(read("b")).rejects.toThrow("429");
+  expect(calls).toBe(1);
+  expect((await s.read<{pause:number}>("providers/twelve.json"))!.pause).toBeGreaterThanOrEqual(start+180000);
 });

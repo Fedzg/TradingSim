@@ -56,7 +56,7 @@ export class TelegramChannel implements Channel {
         signal: AbortSignal.timeout(10_000),
       });
     } catch {
-      throw new Error("Telegram indisponibile o risposta scaduta.");
+      throw new Error("Esito Telegram incerto: risposta persa. Nuovo tentativo dalla prima parte non confermata; possibile duplicato.");
     }
     const reply = await response.json().catch(() => null) as TelegramReply | null;
     const code = response.ok ? reply?.error_code : response.status;
@@ -66,7 +66,7 @@ export class TelegramChannel implements Channel {
       throw new RetryDelivery("Limite di invio Telegram raggiunto.", seconds);
     }
     if (!response.ok || reply?.ok !== true) {
-      throw new Error(typeof code === "number" ? `Telegram HTTP ${code}.` : "Risposta Telegram non valida.");
+      throw new Error(typeof code === "number" ? `Telegram HTTP ${code}.` : "Esito Telegram incerto: risposta non valida; possibile duplicato al ritentativo.");
     }
   }
 }

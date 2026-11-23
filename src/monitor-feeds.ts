@@ -101,8 +101,8 @@ export class MonitorFeeds {
     const observations=listed.filter(q=>q.expireDate!*1000>+now);
     // Compare cumulative volumes only for the same venue session and nearby timestamps.
     if (!observations.length || observations.some(q=>
-      !q.sessionStart || q.sessionStart!==observations[0].sessionStart || q.regularMarketTime<q.sessionStart ||
-      !positive(q.regularMarketVolume) || !q.sessionEnd || q.regularMarketTime>q.sessionEnd || Math.abs(q.regularMarketTime-observations[0].regularMarketTime)>300)) return [];
+      !q.sessionStart || q.sessionStart!==observations[0].sessionStart || q.sessionEnd!==observations[0].sessionEnd || q.regularMarketTime<q.sessionStart ||
+      !positive(q.regularMarketVolume) || !q.sessionEnd || q.regularMarketTime>q.sessionEnd || Math.max(...observations.map(v=>v.regularMarketTime))-Math.min(...observations.map(v=>v.regularMarketTime))>300)) return [];
     return observations;
   }
   async metal(symbol: string): Promise<Quote> {
@@ -123,11 +123,28 @@ export class MonitorFeeds {
         bid:positive(quote.bid) ? quote.bid : undefined, ask:positive(quote.ask) ? quote.ask : undefined};
     },80,Number(process.env.GOLDAPI_DAILY_LIMIT ?? Infinity),{priority:this.priority && symbol==="XAU/USD",fresh:this.verifyDirect,cacheOnly:!this.verifyDirect && weekendClosed()});
   }
+  async goldMinute():Promise<Quote> {
+    const key=await secret("TWELVE_DATA_API_KEY");
+    return cached(this.state,"twelve","XAU/USD/quote/1min",5*mins,async()=>{
+      const url=new URL("https://api.twelvedata.com/quote?symbol=XAU%2FUSD&interval=1min");
+      const q=await (await publicResponse(url,{Authorization:"apikey "+key})).json();
+      if(q.status==="error") throw new FeedFailure(Number(q.code)||0);
+      if(q.symbol!=="XAU/USD" || !positive(q.timestamp) || !positive(Number(q.close))) throw new FeedFailure(0);
+      return {symbol:q.symbol,provider:"Twelve Data · quote 1min",currency:"USD",regularMarketPrice:Number(q.close),regularMarketTime:q.timestamp};
+    },8,Math.min(700,Number(process.env.TWELVE_DATA_DAILY_LIMIT??700)),{priority:this.priority,cacheOnly:weekendClosed()});
+  }
   async spotQuote(symbol:string, now:Date):Promise<Quote> {
     const ticker=spotTickers[symbol];
     if (!ticker) throw new Error("Strumento spot non supportato");
     const fx=pairs.includes(symbol);
     const maxAge=(fx?freshness.forex:freshness.spot)*mins;
+    if (!fx) {
+      if (symbol==="XAU/USD") {
+        const primary=await this.goldMinute().catch(()=>undefined);
+        if (primary && primary.regularMarketTime*1000<=+now && +now-primary.regularMarketTime*1000<=maxAge) return primary;
+      }
+      return this.metal(symbol);
+    }
     let preferred:Quote|undefined;
     let reason:unknown;
     try {

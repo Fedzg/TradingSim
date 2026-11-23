@@ -28,9 +28,10 @@ export function trend(series: Series, now: Date): { metrics?: Trend; problem?: s
   const daily = closedCandles(series, "1Day", now);
   const intra = closedCandles(series, "15Min", now);
   const last = intra.at(-1);
-  if (daily.length < 16 || intra.length < 5 || !last) return { problem: "Servono almeno 16 sedute e 5 candele a 15 minuti." };
+  if (daily.length < 16 || intra.length < 5 || !last) return { problem: `Storico insufficiente: ${daily.length}/16 sedute, ${intra.length}/5 candele intraday.` };
   const age = +now - Date.parse(last.t);
-  if (age < 0 || age > 90 * 60_000 || intra.slice(-5).slice(1).some((bar, i) => Date.parse(bar.t) - Date.parse(intra.at(-5 + i)!.t) !== 15 * 60_000)) return { problem: "Candele a 15 minuti vecchie o discontinue." };
+  if (age < 0 || age > 90 * 60_000) return { problem: "Candele intraday vecchie o timestamp futuro: "+last.t };
+  if (intra.slice(-5).slice(1).some((bar, i) => Date.parse(bar.t) - Date.parse(intra.at(-5 + i)!.t) !== 15 * 60_000)) return { problem: "Buco nella serie: le ultime cinque candele a 15 minuti non sono consecutive." };
   const days = daily.slice(-21);
   if (+now - Date.parse(days.at(-1)!.t) > 5 * 24 * hour) return { problem: "Serie giornaliera non recente." };
   const moves = days.slice(1).map((bar, i) => Math.abs(pct(days[i].c, bar.c))).sort((a, b) => a - b);
@@ -57,7 +58,12 @@ export async function scan(now: Date, load = readSeries) {
     try {
       const series = await load(instrument);
       const signal = series.error ? { problem:series.error } : trend(series, now);
-      return { instrument, source:series.source, ...signal, indicators: signal.metrics ? marketEvidence(series, now) : undefined };
+      const obs=series.observation;
+      let problem=signal.problem;
+      if (problem && obs?.session==="chiusa") problem="Calendario: seduta chiusa. "+problem;
+      else if (problem && obs?.provider==="Alpaca IEX") problem="Copertura feed IEX: "+problem;
+      else if (problem && obs?.provider==="Alpaca Crypto") problem="Serie crypto 24/7: "+problem;
+      return { instrument, source:series.source, ...signal, problem, indicators: signal.metrics ? marketEvidence(series, now) : undefined };
     } catch { return { instrument, problem: "Fonte dati non raggiungibile o non valida." }; }
   }));
   const candidates = observations.flatMap(({ instrument, metrics, indicators, source }) => metrics ? [{

@@ -148,7 +148,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       text.push("Volume seduta "+fmt(q.regularMarketVolume));
       if (positive(q.regularMarketVwap)) text.push("VWAP seduta "+fmt(q.regularMarketVwap));
     }
-    if (q.continuous || (q.provider==="goldApi.dev" || q.provider?.includes("fallback spot"))) {
+    if (q.continuous || (q.provider==="Twelve Data · quote 1min" || q.provider==="goldApi.dev" || q.provider?.includes("fallback spot"))) {
       text.push(q.continuous ? "Indicatori sospesi: rollover della serie continua non verificabile." : "OHLC spot non disponibili.");
       continue;
     }
