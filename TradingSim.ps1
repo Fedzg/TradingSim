@@ -16,7 +16,7 @@ $services = [ordered]@{
     gold=@('GOLDAPI_KEY')
 }
 $names = @{alpaca='Alpaca Paper';telegram='Telegram';twelve='Twelve Data';gold='goldApi.dev'}
-$files = @{APCA_API_KEY_ID='alpaca-key';APCA_API_SECRET_KEY='alpaca-secret';TELEGRAM_BOT_TOKEN='telegram.env';TELEGRAM_CHAT_ID='telegram.env';TWELVE_DATA_API_KEY='monitor.env';GOLDAPI_KEY='monitor.env'}
+$files = @{APCA_API_KEY_ID='alpaca-key';APCA_API_SECRET_KEY='alpaca-secret';TELEGRAM_BOT_TOKEN='telegram.env';TELEGRAM_CHAT_ID='telegram.env';TWELVE_DATA_API_KEY='monitor.env';GOLDAPI_KEY='monitor.env';GOLDAPI_URL_TEMPLATE='monitor.env';GOLDAPI_AUTH_HEADER='monitor.env'}
 $labels = @{APCA_API_KEY_ID='Chiave Alpaca Paper';APCA_API_SECRET_KEY='Segreto Alpaca Paper';TELEGRAM_BOT_TOKEN='Token del bot Telegram';TELEGRAM_CHAT_ID='ID chat Telegram';TWELVE_DATA_API_KEY='Chiave Twelve Data';GOLDAPI_KEY='Chiave goldApi.dev'}
 $template='https://goldapi.dev/api/v1/price/{metal}/USD'
 $script:page=0
@@ -307,8 +307,8 @@ function Draw {
                 foreach ($key in $inputs.Keys) {if (!$inputs[$key].Text.Trim()) {throw ('Compila '+$labels[$key])}}
                 foreach ($key in $copyKeys) {WriteValue $key (LocalValue $key)}
                 foreach ($key in $inputs.Keys) {WriteValue $key $inputs[$key].Text.Trim(); $inputs[$key].Clear()}
-                WriteValue GOLDAPI_URL_TEMPLATE $template
-                WriteValue GOLDAPI_AUTH_HEADER 'X-API-Key'
+                if (!(Present GOLDAPI_URL_TEMPLATE)) {WriteValue GOLDAPI_URL_TEMPLATE $template}
+                if (!(Present GOLDAPI_AUTH_HEADER)) {WriteValue GOLDAPI_AUTH_HEADER 'X-API-Key'}
                 $script:page=2; Draw
             }
         }
@@ -355,6 +355,35 @@ if ($ProvaOffline) {
         $script:page=3; Draw
         if (!($panel.Controls | Where-Object {$_.Text -like '*Verifica fallita*'})) {throw 'Esito mancante'}
         [Windows.Forms.Application]::DoEvents()
+    }
+    # Exercise the same build, test, secret-transfer and verification handlers with fake executables.
+    $script:calls=New-Object 'System.Collections.Generic.List[string]'
+    function Native($exe,[string[]]$argv,[string]$payload) {
+        $command=$exe+' '+($argv -join ' ')
+        $calls.Add($command)
+        if ($command.Contains('fixture-secret-value')) {throw 'Segreto esposto negli argomenti'}
+        if ($command -like '*rev-parse*') {return 'abcdef123456'}
+        if ($command -like '*git archive*') {
+            $dest=($argv | Where-Object {$_ -like '--output=*'}).Substring(9)
+            [IO.File]::WriteAllText($dest,'archivio simulato')
+        }
+        if ($command -like '*docker inspect*') {return 'tradingsim_state'}
+        if (($command+' '+$payload) -match 'monitor-check --setup') {return '{"alpaca":true,"telegram":true,"twelve":true,"gold":false}'}
+        return ''
+    }
+    $script:localDir=[IO.Path]::GetTempPath()
+    $script:project='tradingsim'; $script:worker='worker-finto'
+    $script:sshArgs=@('-o','StrictHostKeyChecking=yes'); $script:target='operatore@scheda-finta'
+    foreach ($mode in $false,$true) {
+        $script:board=$mode
+        $calls.Clear()
+        $report=Verify
+        if (!$report.twelve -or $report.gold) {throw 'Esito provider confuso con successo del processo'}
+        if ($mode) {
+            WriteValue GOLDAPI_KEY 'fixture-secret-value'
+            if (!($calls -match 'StrictHostKeyChecking=yes')) {throw 'SSH privo di verifica'}
+        } elseif (!($calls -match '--network none.*bun test')) {throw 'Test senza isolamento'}
+        if ($calls -match 'compose .* up |docker .* schedule') {throw 'Scheduler avviato durante preparazione'}
     }
     $form.Close()
     Write-Output 'Percorsi Windows e KICKPI verificati con dati fittizi.'
