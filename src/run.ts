@@ -1,3 +1,4 @@
+import {breakerOpen, confirms, manualPermission, recordHealth, strategyAlert} from "./strategy-controls";
 import {allowedStrategies,capacity,entryPlan,executionMode,setups,type Plan} from "./strategies";
 import {closedCandles} from "./indicators";
 import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAnalysis } from "./agents";
@@ -40,6 +41,10 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
 
   const lock: RunLock = { wake: entry, pid: process.pid, startedAt: now.toISOString(), intents: [] };
   const mode=executionMode();
+  const sessionDate = newYork(now).date;
+  const suspended = mode !== "legacy" && await breakerOpen(state, sessionDate);
+  let strategyFault = false;
+  const signalAlert = (key: string, text: string) => strategyAlert(state, entry.id, key, redact(text));
   const alerts: string[] = [];
   const simulated = broker instanceof FakeBroker;
   const brokerLabel = simulated ? "broker finto" : "Alpaca Paper";
@@ -121,16 +126,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     if (uncertainSymbols.has(order.symbol) || (order.side === "buy" && unresolved.size)) return reject("Invio precedente ancora da riconciliare.");
     if(mode==="approval-required"){
       const ticket=ticketFor(order,limit,plan);
-      const key=new Bun.CryptoHasher("sha256").update(id+ticket).digest("hex");
-      const expires=Math.min(plan?.expires??Infinity,Date.now()+60000);
-      await state.write("approvals/"+key+".json",{ticket,id,expires});
-      console.log("In attesa di autorizzazione: "+key);
-      let approved=false;
-      while(Date.now()<expires){
-        if(await state.read("permissions/"+key+".json")){approved=true;break;}
-        await Bun.sleep(500);
-      }
-      if(!approved) return reject("Approvazione manuale scaduta.");
+      if(!await manualPermission(state,id,ticket,plan?.expires??Date.now()+60000)) return reject("Approvazione manuale scaduta.");
     }
     try {
       const already = await broker.find(id);
@@ -155,22 +151,26 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       if (issue) return reject(issue);
       if(plan){
         const instant=new Date();
-        if(!allowedStrategies().includes(plan.strategy) || capacity(plan,current,intents,instant)<order.qty)
+        if(suspended || strategyFault || !allowedStrategies().includes(plan.strategy) || capacity(plan,current,intents,instant)<order.qty)
           return reject("Scadenza, capitale o rischio cambiati dopo revisione.");
         const date=newYork(instant).date;
         const day=(await broker.calendar(date,date))[0];
         if(!day || !briefingSession([day],current.clock,instant).today) return reject("Calendario non verificato.");
-        const fresh=(await market.charts(instant)).find(c=>c.symbol===order.symbol);
+        const fresh=charts.find(c=>c.symbol===order.symbol && c.source==="Alpaca IEX");
         const checked=fresh && entryPlan(fresh,day,instant,[plan.strategy]);
+        if(!broker.quote || !confirms(plan, await broker.quote(order.symbol), Date.now()))
+          return reject("Spread, timestamp o prezzo corrente non confermano il segnale.");
         if(JSON.stringify(checked)!==JSON.stringify(plan)) return reject("Segnale cambiato dopo revisione.");
       }
       if (!await broker.tradable(order.symbol)) return reject("Titolo non negoziabile su Alpaca Paper.");
     } catch (error) {
+      strategyFault = true;
       alerts.push(`Verifica broker prima di ${id}: ${errorText(error)}`);
       reasons.push(errorText(error));
       return reject("Impossibile verificare il broker prima dell’invio.");
     }
 
+    if (plan && Date.now() >= plan.expires) return reject("Segnale scaduto.");
     const intent: Intent = { id, order, limit, ...(plan?{plan}:{}), attemptedAt: new Date().toISOString() };
     await state.write(`intents/${id}.json`, intent);
     intents.push(intent);
@@ -186,6 +186,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       note(observed(result, brokerLabel));
       if (!terminal.has(result.status)) pending.add(id);
     } catch (error) {
+      strategyFault = true;
       alerts.push(`Risposta all’invio ${id}: ${errorText(error)}`);
       if (error instanceof OrderRejected) {
         intent.submissionRejection = error.message;
@@ -201,9 +202,18 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     reportIssue(`Conto, posizioni, ordini e orologio non verificati: ${errorText(error)}`);
   }
 
-  if (snapshot && trading(entry, snapshot)) {
+  if (mode!=="analysis-only" && snapshot && trading(entry, snapshot)) {
     for (const order of stops(snapshot)) {
       note(`Stop obbligatorio proposto dal codice: ${order.symbol} × ${order.qty}.`);
+      if (mode!=="legacy") {
+        const ticket=ticketFor(order,null);
+        try {
+          const stopReview=await reviewOrder(agents,ticket,orderReviewContext(order,null,snapshot,entry,undefined,undefined,undefined,now));
+          if(stopReview.ticket!==ticket || stopReview.review.verdict!=="approve") {
+            explain("Stop respinto dal revisore: "+order.symbol);continue;
+          }
+        } catch {reportIssue("Revisione dello stop indisponibile: "+order.symbol);continue;}
+      }
       await execute(order, null, undefined, true);
     }
   }
@@ -223,6 +233,16 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   }
 
   if(mode!=="legacy") for(const chart of charts.filter(c=>universe.some(s=>s===c.symbol))) note(chart.symbol+" · setup giornalieri: "+(setups(closedCandles(chart,"1Day",now)).join(", ")||"nessuno"));
+  if(mode!=="legacy") for(const chart of charts.filter(c=>c.source==="Alpaca IEX")){
+    const bars=closedCandles(chart,"15Min",now);
+    const last=bars.at(-1), history=bars.slice(-21,-1);
+    if(!last || history.length<20 || +now-Date.parse(last.t)>1200000) continue;
+    if(last.c<Math.min(...history.map(b=>b.l)))
+      await signalAlert("support/"+chart.symbol+"/"+last.t,chart.symbol+" · supporto a 20 barre rotto in chiusura 15 minuti · "+last.c+" · "+last.t);
+    const typical=history.reduce((n,b)=>n+b.h-b.l,0)/history.length;
+    if(typical>0 && last.h-last.l>3*typical)
+      await signalAlert("range/"+chart.symbol+"/"+last.t,chart.symbol+" · range 15 minuti superiore a 3 volte la media delle 20 barre precedenti · "+last.t);
+  }
   const monitored = [...new Set([...watched, ...charts.map(series => series.symbol)])];
   const newsInput = news && {
     ...news,
@@ -333,6 +353,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       const date=newYork(now).date;
       const day=(await broker.calendar(date,date))[0];
       if(!day || !snapshot.clock.is_open || !trading(entry,snapshot)) explain("Sessione di ingresso chiusa.");
+      else if(suspended) explain("Circuit breaker attivo per la seduta USA.");
       else if(newsError || warning || interrupted || unresolved.size || alerts.length) explain("Ingressi sospesi: dati o riconciliazione incompleti.");
       else {
         briefingSession([day],snapshot.clock,now);
@@ -341,7 +362,12 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
           if(!plan) continue;
           const qty=capacity(plan,snapshot,intents,now);
           const reason=`${plan.strategy} · ${plan.source} · candela ${plan.bar} · ingresso ${plan.entry} · stop ${plan.stop} · target 2R ${plan.targets[1]} · quantità ${qty} · perdita teorica ${(qty*(plan.entry-plan.stop)).toFixed(2)} USD · RVOL ${plan.rvol.toFixed(2)}`;
-          if(!qty){explain("Limite di rischio: "+reason);continue;}
+          await signalAlert("breakout/"+plan.symbol+"/"+plan.bar, "Breakout confermato: "+reason);
+          if(!qty){
+            explain("Limite di rischio: "+reason);
+            await signalAlert("budget/"+date+"/"+plan.symbol, "Ingresso bloccato dai limiti di rischio o di capitale. "+reason);
+            continue;
+          }
           plans.set(chart.symbol,plan);
           decision.orders.push({symbol:chart.symbol,side:"buy",qty,reason});
           explain(reason);
@@ -363,11 +389,21 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       try {
         const pertinent = orderReviewContext(order, limit, snapshot, entry,
           charts.find(series => series.symbol === order.symbol), chartAnalysis, newsAnalysis, now);
+        if(plan && !simulated && process.env.TRADINGSIM_SEC_USER_AGENT){
+          const {issuers,secData,fundamentals}=await import("./edgar");
+          if(Object.hasOwn(issuers,order.symbol)){
+            const issuer=order.symbol as keyof typeof issuers;
+            try {Object.assign(pertinent.evidence,{fundamentals:fundamentals(issuer,await secData(state,issuer,true),now)});}
+            catch {Object.assign(pertinent.evidence,{fundamentals:"SEC non verificabile"});}
+          }
+        }
         const approval = await reviewOrder(agents, ticketFor(order, limit,plan), pertinent);
         if (approval.review.verdict !== "approve") {
+          if(plan) await signalAlert("review/"+entry.id+"/"+plan.symbol,"Respinto dal revisore: "+plan.symbol+" · "+approval.review.reason);
           explain(`Respinto dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
           continue;
         }
+        if(plan) await signalAlert("review/"+entry.id+"/"+plan.symbol, "Approvato dal revisore: "+plan.symbol+" · "+approval.review.reason);
         note(`Approvato dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
         await execute(order, limit, approval.ticket,false,plan);
       } catch (error) {
@@ -435,6 +471,11 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     events: newsError ? [] : paperEvents, newsError, charts: details });
   const baton: Baton = { wake: entry, savedAt: new Date().toISOString(), planNext: toCheck, report: lines.join("\n"),
     pending: [...pending], summary: { reasons: reasons.map(redact), alerts: alerts.map(redact) } };
+  if(mode !== "legacy" && entry.slot !== "09:00") {
+    await recordHealth(state,sessionDate,entry.id,strategyFault || !snapshot || !decision || !!newsError || unresolved.size > 0 || alerts.some(a=>a.startsWith("Revisione o esecuzione")));
+    for(const event of paperEvents.filter(e=>e.status !== "notizia storica").slice(0,3))
+      await signalAlert("news/"+event.key,event.title+" · "+event.impact+" "+event.link);
+  }
   const event = `${entry.id}-${crypto.randomUUID()}.json`;
   await state.write(`history/${event}`, baton);
   await state.write(`logs/${event}`, { run: entry.id, report: baton.report, alerts: alerts.map(redact), technical: details.map(row => redact(row.full)) });

@@ -3,21 +3,22 @@ import {nyInstant,validDate} from "./time";
 import type {MarketSession} from "./broker";
 
 export type Tape={symbol:string; source:string; sessions:(MarketSession & {bars:Bar[]})[]};
-type Trade={date:string;strategy:Strategy;outcome:"stop"|"target"|"open";r:number};
+type Trade={date:string;strategy:Strategy;outcome:"stop"|"target"|"time";r:number};
 export function outcome(plan:Plan,bars:Bar[],bps:number):Omit<Trade,"strategy"|"date">|undefined{
   const first=bars[0];
   if(!first || first.o>plan.entry) return; // Require a fillable limit at the next open.
   const fill=Math.min(plan.entry,first.o*(1+bps/10000));
   const risk=plan.entry-plan.stop;
   const result=(outcome:Trade["outcome"],price:number)=>({outcome,r:(price*(1-bps/10000)-fill)/risk});
-  for(const bar of bars){
+  for(const [index,bar] of bars.entries()){
+    if (index === bars.length-1) return result(bar.o <= plan.stop ? "stop" : "time",bar.o);
     if(bar.l<=plan.stop) return result("stop",Math.min(bar.o,plan.stop));
     if(bar.h>=plan.targets[1]) return result("target",plan.targets[1]);
   }
-  return result("open",bars.at(-1)!.c); // Mark at close, separately from realized returns.
+  throw Error("Serie di uscita incompleta");
 }
 function metrics(trades:Trade[]){
-  const closed=trades.filter(t=>t.outcome!=="open"), wins=closed.filter(t=>t.r>0);
+  const closed=trades, wins=closed.filter(t=>t.r>0);
   const gains=wins.reduce((s,t)=>s+t.r,0), losses=closed.reduce((s,t)=>s-Math.min(0,t.r),0);
   let pnl=0,peak=0,drawdown=0;
   for(const t of closed){pnl+=t.r;peak=Math.max(peak,pnl);drawdown=Math.max(drawdown,peak-pnl);}
@@ -52,7 +53,14 @@ export function replay(tape:Tape, strategy:Strategy, simulations=1000, seed=1234
   }
   const boundary=tape.sessions[split]?.date;
   const validation=trades.filter(t=>boundary && t.date>=boundary);
-  const pool=validation.filter(t=>t.outcome!=="open");
+  const pool=validation;
+  // Chronological expanding history. Rules and parameters stay fixed across folds.
+  const walkForward=[];
+  for(let start=split; start<tape.sessions.length; start+=5){
+    const dates=tape.sessions.slice(start,start+5).map(s=>s.date);
+    walkForward.push({historyThrough:tape.sessions[start-1].date,from:dates[0],through:dates.at(-1),
+      ...metrics(validation.filter(t=>dates.includes(t.date)))});
+  }
   let rng=seed>>>0;
   const means:number[]=[];
   if(pool.length>=10) for(let i=0;i<simulations;i++){
@@ -62,7 +70,7 @@ export function replay(tape:Tape, strategy:Strategy, simulations=1000, seed=1234
   }
   means.sort((a,b)=>a-b);
   return {symbol:tape.symbol,source:tape.source,strategy,sessions:tape.sessions.length,seed,bps,validationStart:boundary,
-    development:metrics(trades.filter(t=>!boundary||t.date<boundary)),outOfSample:metrics(validation),
+    walkForward,development:metrics(trades.filter(t=>!boundary||t.date<boundary)),outOfSample:metrics(validation),
     bootstrap:means.length?{simulations,p05:means[Math.floor(means.length*.05)],p95:means[Math.floor(means.length*.95)]}:"campione insufficiente",
     trades};
 }

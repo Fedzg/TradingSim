@@ -18,6 +18,7 @@ export type Fill = { id: string; order_id: string; symbol: string; side: Side; q
 export type Snapshot = { account: Account; positions: Position[]; orders: BrokerOrder[]; openOrders?: BrokerOrder[]; clock: Clock };
 
 export interface Broker {
+  quote?(symbol: string): Promise<import("./strategy-controls").Quote>;
   calendar(start: string, end: string): Promise<MarketSession[]>;
   clock(): Promise<Clock>;
   snapshot(): Promise<Snapshot>;
@@ -137,6 +138,36 @@ export class Alpaca implements Broker {
     return open.map(snapshotOrder);
   }
 
+  async bracket(intent: Intent) {
+    const parent = await this.find(intent.id);
+    if (!parent?.id) throw Error("ID bracket non verificabile");
+    const raw = await payload<BrokerOrder & {order_class:string; legs?:BrokerOrder[]}>(
+      this.mcp, "get_order_by_id", {order_id:parent.id, nested:true});
+    if(raw.id!==parent.id || raw.client_order_id!==intent.id || raw.symbol!==intent.order.symbol ||
+       raw.side!=="buy" || Number(raw.qty)!==intent.order.qty || raw.order_class!=="bracket") throw Error("Identità bracket non verificabile");
+    const legs=(raw.legs??[]).map(snapshotOrder);
+    if(legs.some(x=>!x.id || x.symbol!==raw.symbol || x.side!=="sell")) throw Error("Gambe bracket non verificabili");
+    return {parent:snapshotOrder(raw),legs};
+  }
+
+  async lowerTarget(id:string, clientId:string, limit:number) {
+    return snapshotOrder(await payload<BrokerOrder>(this.mcp,"replace_order_by_id",{
+      order_id:id,client_order_id:clientId,limit_price:String(limit)}));
+  }
+
+  async cancelUnfilled(id:string) {
+    const result=await this.mcp.call("cancel_order_by_id",{order_id:id});
+    if(result.isError) throw Error("Annullamento non confermato");
+  }
+
+  async quote(symbol: string) {
+    const data = await payload<{quotes: Record<string, import("./strategy-controls").Quote>}>(
+      this.mcp, "get_stock_latest_quote", { symbols: symbol, feed: "iex" });
+    const quote = data.quotes?.[symbol];
+    if (!quote) throw Error("Quotazione IEX non verificabile");
+    return quote;
+  }
+
   async tradable(symbol: string) {
     const asset = await payload<{ tradable: boolean; status: string; class: string }>(this.mcp, "get_asset", { symbol_or_asset_id: symbol });
     return asset.tradable === true && asset.status === "active" && asset.class === "us_equity";
@@ -181,6 +212,7 @@ export class FakeMcp implements Mcp {
     const snapshot = await this.snapshot();
     const reply = (data: unknown) => ({ structuredContent: { _alpaca_mcp_security: {}, data: Array.isArray(data) ? { result: data } : data } });
     switch (name) {
+      case "get_stock_latest_quote": return reply({ quotes: await this.state.read("fake-quotes.json") ?? {} });
       case "get_account_info": return reply(snapshot.account);
       case "get_all_positions": return reply(snapshot.positions);
       case "get_clock": return reply(await this.state.read<Clock>("fake-clock.json") ?? snapshot.clock);

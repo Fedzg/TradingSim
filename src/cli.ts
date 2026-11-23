@@ -1,3 +1,5 @@
+import { manageBrackets } from "./strategy-exits";
+import { executionMode } from "./strategies";
 import { mkdir } from "node:fs/promises";
 import { config } from "./config";
 import { Alpaca, FakeBroker } from "./broker";
@@ -170,7 +172,7 @@ async function schedule() {
         discovering = true;
         background("discovery.guard", "_discover");
       }
-      if ((telegram || fake) && !polling && +now - lastOrders >= 60_000) {
+      if ((telegram || fake || executionMode()!=="legacy") && !polling && +now - lastOrders >= 60_000) {
         lastOrders = +now;
         polling = true;
         background("orders.guard", "_orders");
@@ -274,6 +276,7 @@ try {
       break;
     }
     case "strategy-fundamentals": {
+      if (fake) throw Error("SEC disabilitata in modalità finta. Usare le fixture offline.");
       const {secData,fundamentals,issuers}=await import("./edgar");
       const symbol=flags[0] as keyof typeof issuers;
       console.log(JSON.stringify(fundamentals(symbol,await secData(state,symbol,true),new Date()),null,2));
@@ -376,7 +379,9 @@ try {
       try {
         if (!scanAt || +now - Date.parse(scanAt) >= 15 * 60_000) {
           const source = fake ? async (item: { symbol: string }) => ({ ...fakeCharts(now)[0], symbol: item.symbol }) : readSeries;
-          const result = await measureFeed("discovery", () => scan(now, source));
+          const saved = await state.read<CloseSchedule>(closeCalendar);
+          const session = saved?.date === newYork(now).date ? saved.session ?? undefined : undefined;
+          const result = await measureFeed("discovery", () => scan(now, source, session));
           await engine.collect(result, (await market.cachedNews(state)).articles, now);
         }
         // Anche con una revisione operatore in attesa, il controllo dovuto ha priorità.
@@ -389,7 +394,17 @@ try {
     }
     case "_gold": await goldBriefing(state, new Date(), fake, opts.redact); break;
     case "_close": await dailyClose(state, paper(), new Date(), opts.redact); break;
-    case "_orders": await pollOrders(state, paper(), opts.redact); break;
+    case "_orders": {
+      await pollOrders(state, paper(), opts.redact);
+      if(executionMode()!=="legacy" && (await state.intents()).some(i=>i.plan))
+        await child("run.guard","_exits",mode).exited;
+      break;
+    }
+    case "_exits": {
+      const model=measureAgents("strategy-exits",fake?new FakeAgents():new CodexAgents(opts.redact));
+      await manageBrackets(state,paper(),model.agents).finally(model.log);
+      break;
+    }
     case "_flush": await flushNotifications(state, channel, opts.redact); break;
     case "_run": {
       if (!scheduledDate || !slots.includes(rawSlot as Slot)) throw new Error("Sveglia interna non valida.");

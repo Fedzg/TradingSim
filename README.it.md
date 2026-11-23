@@ -120,3 +120,5 @@ si usa la prossima apertura indicata da Alpaca. La crypto mantiene la sessione 2
 Documentazione: [Twelve Data](https://twelvedata.com/docs),
 [goldApi.dev](https://goldapi.dev), [FRED DGS10](https://fred.stlouisfed.org/series/DGS10),
 [termini Yahoo](https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html).
+
+[Strategie Paper e validazione 2.0](deploy/strategie.it.md)

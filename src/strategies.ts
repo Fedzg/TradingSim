@@ -6,7 +6,7 @@ import {terminal} from "./risk";
 export type Bar=Series["intervals"][string][number];
 export const strategies=["orb","resistance"] as const;
 export type Strategy=typeof strategies[number];
-export type Plan={strategy:Strategy;symbol:string;bar:string;expires:number;entry:number;stop:number;targets:number[];source:string;level:number;rvol:number};
+export type Plan={strategy:Strategy;symbol:string;bar:string;expires:number;exitAt:number;entry:number;stop:number;targets:number[];source:string;level:number;rvol:number};
 export const modes=["analysis-only","approval-required","paper-auto"] as const;
 export function executionMode(){
   const mode=process.env.TRADINGSIM_EXECUTION_MODE;
@@ -38,7 +38,7 @@ export function setups(bars:Bar[]){
   return out;
 }
 export function entryPlan(series:Series,session:MarketSession,now:Date,allowed:readonly Strategy[], research=false):Plan|undefined{
-  if((!research && (!universe.some(s=>s===series.symbol)|| series.source!=="Alpaca IEX")) || series.error || series.intervalErrors?.["15Min"] || series.intervalErrors?.["1Day"]) return;
+  if(newYork(now).date!==session.date || (!research && (!universe.some(s=>s===series.symbol)|| series.source!=="Alpaca IEX")) || series.error || series.intervalErrors?.["15Min"] || series.intervalErrors?.["1Day"]) return;
   const open=+nyInstant(session.date,session.open), close=+nyInstant(session.date,session.close);
   if(!(open+2*quarter<=+now && +now<close-quarter)) return;
   const completed=(bars:Bar[],duration:number)=>bars.filter(b=>Date.parse(b.t)+duration<=+now);
@@ -63,7 +63,7 @@ export function entryPlan(series:Series,session:MarketSession,now:Date,allowed:r
     const distance=entry-stop;
     if(distance<entry*.002 || distance>entry*.031) continue;
     return {symbol:series.symbol,strategy,level,entry,stop,targets:[1,2,3].map(r=>Math.round((entry+r*distance)*100)/100),
-      rvol,bar:last.t,expires:Math.min(at+5*60000,close-quarter),source:series.source};
+      rvol,bar:last.t,exitAt:close-quarter,expires:Math.min(at+5*60000,close-quarter),source:series.source};
   }
 }
 export function capacity(p:Plan,s:Snapshot,intents:Intent[],now:Date):number{
@@ -71,8 +71,10 @@ export function capacity(p:Plan,s:Snapshot,intents:Intent[],now:Date):number{
   const clock=Date.parse(s.clock.timestamp);
   if(!(s.clock.is_open && !s.account.trading_blocked && Math.abs(+now-clock)<=60000 && now.getTime()<=p.expires &&
     prior>0 && equity>prior*.99 && p.entry>p.stop && p.stop>0 && p.targets[1]-p.entry>=1.999*(p.entry-p.stop))) return 0;
+  if(s.positions.filter(x=>Number(x.qty)>0).length>=5) return 0;
   if(s.positions.some(x=>x.symbol===p.symbol || Number(x.qty)<0)) return 0;
   const day=newYork(now).date;
+  if (intents.some(i=>i.plan && i.plan.symbol===p.symbol && i.plan.bar===p.bar)) return 0;
   const journal=intents.filter(i=>i.order.side==="buy" && newYork(new Date(i.attemptedAt)).date===day);
   const recent=s.orders.filter(o=>o.side==="buy" && (!o.submitted_at || newYork(new Date(o.submitted_at)).date===day));
   if(new Set([...journal.map(i=>i.id),...recent.map(o=>o.client_order_id)]).size>=3) return 0;

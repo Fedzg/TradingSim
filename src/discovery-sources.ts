@@ -1,3 +1,5 @@
+import { setups, entryPlan } from "./strategies";
+import type { MarketSession } from "./broker";
 import { equities, sourceOf } from "./monitor-feeds";
 import { closedCandles, marketEvidence, pct, relativeVolume, type MarketEvidence } from "./indicators";
 import { yahoo, type Series } from "./market";
@@ -21,7 +23,7 @@ export const catalog: readonly Instrument[] = [
 
 export type Evidence = { url: string; source: string; at: string; detail: string };
 export type Candidate = { instrument: Instrument; market: Evidence; metrics: Trend; indicators?: MarketEvidence };
-type Trend = { dayPct: number; hourPct: number; typicalDayPct: number; relativeMove: number; volumeMultiple: number | null; lastClose: number; invalidation: number; at: string };
+type Trend = { dayPct: number; hourPct: number; typicalDayPct: number; relativeMove: number; setups?: string[]; volumeMultiple: number | null; lastClose: number; invalidation: number; at: string };
 const hour = 3600_000;
 
 export function trend(series: Series, now: Date): { metrics?: Trend; problem?: string } {
@@ -53,11 +55,16 @@ export async function readSeries(instrument: Instrument): Promise<Series> {
     updated: intra.at(-1)?.t ?? null, intervals: { "15Min": intra.slice(-30), "1Day": daily.slice(-30) } };
 }
 
-export async function scan(now: Date, load = readSeries) {
+export async function scan(now: Date, load = readSeries, session?: MarketSession) {
   const observations = await Promise.all(catalog.map(async instrument => {
     try {
       const series = await load(instrument);
       const signal = series.error ? { problem:series.error } : trend(series, now);
+      if(signal.metrics && instrument.category==="azioni"){
+        const labels=setups(closedCandles(series,"1Day",now));
+        if(session && entryPlan(series,session,now,["orb"],true)) labels.push("opening-range-breakout");
+        signal.metrics.setups=labels;
+      }
       const obs=series.observation;
       let problem=signal.problem;
       if (problem && obs?.session==="chiusa") problem="Calendario: seduta chiusa. "+problem;
@@ -68,7 +75,7 @@ export async function scan(now: Date, load = readSeries) {
   }));
   const candidates = observations.flatMap(({ instrument, metrics, indicators, source }) => metrics ? [{
     instrument, metrics, indicators, market: { url: source?.startsWith("Alpaca") ? "https://docs.alpaca.markets/docs/market-data" : source?.startsWith("Twelve Data") ? "https://api.twelvedata.com/time_series?symbol="+encodeURIComponent(instrument.symbol)+"&interval=15min" : quoteUrl(instrument.ticker), source: source ?? sourceOf(instrument.symbol), at: metrics.at,
-      detail: `Movimento giornaliero ${metrics.dayPct.toFixed(2)}%, ${metrics.relativeMove.toFixed(2)}× la volatilità tipica; 60 minuti ${metrics.hourPct.toFixed(2)}%. Volume ${metrics.volumeMultiple?.toFixed(2) ?? "non disponibile"}${metrics.volumeMultiple === null ? "" : "×"}.` },
+      detail: (metrics.setups?.length ? metrics.setups.join(", ")+". " : "")+`Movimento giornaliero ${metrics.dayPct.toFixed(2)}%, ${metrics.relativeMove.toFixed(2)}× la volatilità tipica; 60 minuti ${metrics.hourPct.toFixed(2)}%. Volume ${metrics.volumeMultiple?.toFixed(2) ?? "non disponibile"}${metrics.volumeMultiple === null ? "" : "×"}.` },
   }] : []);
   return { candidates, coverage: categories.map(category => {
     const entries = observations.filter(item => item.instrument.category === category);
