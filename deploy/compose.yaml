@@ -13,6 +13,9 @@ services:
       timeout: 10s
       start_period: 60s
     environment:
+      TRADINGSIM_EXECUTION_MODE: "${TRADINGSIM_EXECUTION_MODE:-}"
+      TRADINGSIM_SEC_USER_AGENT: "${TRADINGSIM_SEC_USER_AGENT:-}"
+      TRADINGSIM_STRATEGIES: "${TRADINGSIM_STRATEGIES:-}"
       ALPACA_PAPER_TRADE: "true"
       APCA_API_KEY_ID_FILE: /run/secrets/alpaca-key
       APCA_API_SECRET_KEY_FILE: /run/secrets/alpaca-secret

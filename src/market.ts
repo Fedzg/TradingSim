@@ -88,8 +88,16 @@ export class Market {
         title: "Dati macro di prova per WTI e GBP/USD", link: "https://example.com/mercati",
         source: "Fonte finta", published: checked, symbols: ["USOIL", "GBP/USD"], summary: "Esempio deterministico.",
       }] : await this.alpacaNews(now);
+      let secIssue:string|undefined;
+      if(!this.fake && process.env.TRADINGSIM_SEC_USER_AGENT){
+        const {issuers,filings,secData}=await import("./edgar");
+        for(const symbol of Object.keys(issuers) as (keyof typeof issuers)[]){
+          try {articles.push(...filings(symbol,await secData(state,symbol,false),now));}
+          catch {secIssue="Fonte SEC EDGAR parziale";}
+        }
+      }
       const merged = new Map([...previous.articles, ...articles].map(x => [x.link, x]));
-      next = { checked, lastSuccess: checked, articles: [...merged.values()]
+      next = { checked, lastSuccess: checked, error:secIssue, articles: [...merged.values()]
         .filter(article => Date.parse(article.published) >= +now - 48 * 3600_000)
         .sort((a, b) => b.published.localeCompare(a.published)).slice(0, 200) };
     } catch (error) {

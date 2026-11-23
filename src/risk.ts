@@ -33,8 +33,8 @@ export function limitFor(order: Proposal, charts: Series[], now: Date) {
   return Math.floor(last.c * decimals) / decimals;
 }
 
-export function ticketFor(order: Proposal, limit: number | null) {
-  return JSON.stringify({ symbol: order.symbol, side: order.side, qty: order.qty, type: limit === null ? "market" : "limit", limit, timeInForce: "day" });
+export function ticketFor(order: Proposal, limit: number | null, plan?:import("./strategies").Plan) {
+  return JSON.stringify({ symbol: order.symbol, side: order.side, qty: order.qty, type: limit === null ? "market" : "limit", limit, plan, timeInForce: "day" });
 }
 
 export function risk(order: Proposal, limit: number | null, snapshot: Snapshot, entry: Wake): string | undefined {

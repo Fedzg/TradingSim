@@ -9,7 +9,7 @@ export type BrokerOrder = {
   client_order_id: string; symbol: string; side: Side; qty: string; filled_qty: string;
   status: string; limit_price: string | null; stop_price?: string | null;
 };
-export type Intent = { id: string; order: Proposal; limit: number | null; attemptedAt: string; submissionRejection?: string; observed?: BrokerOrder };
+export type Intent = { plan?:import("./strategies").Plan; id: string; order: Proposal; limit: number | null; attemptedAt: string; submissionRejection?: string; observed?: BrokerOrder };
 export type Account = { equity: string; last_equity: string; cash: string; buying_power: string; trading_blocked: boolean };
 export type Position = { symbol: string; qty: string; qty_available: string; avg_entry_price: string; current_price: string; market_value: string; unrealized_pl?: string };
 export type Clock = { is_open: boolean; timestamp: string };
@@ -150,10 +150,10 @@ export class Alpaca implements Broker {
     } catch (error) { if (error instanceof McpError && error.notFound) return undefined; throw error; }
   }
 
-  submit({ id, order, limit }: Intent) {
+  submit({ id, order, limit, plan }: Intent) {
     return payload<BrokerOrder>(this.mcp, "place_stock_order", {
       symbol: order.symbol, side: order.side, qty: String(order.qty), time_in_force: "day",
-      client_order_id: id, ...(limit === null ? { type: "market" } : { type: "limit", limit_price: String(limit) }),
+      client_order_id: id, ...(plan ? {order_class:"bracket",take_profit_limit_price:String(plan.targets[1]),stop_loss_stop_price:String(plan.stop)}:{}), ...(limit === null ? { type: "market" } : { type: "limit", limit_price: String(limit) }),
     }).then(brokerFields);
   }
 }

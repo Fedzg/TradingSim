@@ -1,3 +1,5 @@
+import {allowedStrategies,capacity,entryPlan,executionMode,setups,type Plan} from "./strategies";
+import {closedCandles} from "./indicators";
 import { ask, reviewOrder, type Agents, type Charts, type Decision, type NewsAnalysis } from "./agents";
 import { FakeBroker, type Broker, type BrokerOrder, type Intent, type Proposal, type Snapshot, watched, universe } from "./broker";
 import { measureAgents, measureFeed } from "./efficiency-metrics";
@@ -37,10 +39,12 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   if (!interrupted && previous && previous.wake.id >= entry.id && !force) return;
 
   const lock: RunLock = { wake: entry, pid: process.pid, startedAt: now.toISOString(), intents: [] };
+  const mode=executionMode();
   const alerts: string[] = [];
   const simulated = broker instanceof FakeBroker;
   const brokerLabel = simulated ? "broker finto" : "Alpaca Paper";
   const lines: string[] = simulated ? ["SIMULAZIONE OFFLINE. Dati, ordini e consegne finti."] : [];
+  lines.push("Modalità: "+mode);
   const reasons: string[] = [];
   const explain = (reason: string) => { reasons.push(reason); note(reason); };
   const reportIssue = (reason: string) => { reasons.push(reason); alerts.push(reason); };
@@ -104,15 +108,30 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   let accountError: string | undefined;
   let newsError: string | undefined;
 
-  async function execute(order: Proposal, limit: number | null, approvalTicket?: string, mandatory = false) {
+  async function execute(order: Proposal, limit: number | null, approvalTicket?: string, mandatory = false, plan?:Plan) {
     const label = `${order.symbol} ${order.side} × ${order.qty}`;
     const reject = (reason: string) => explain(`Respinto ${label}: ${reason}`);
     const id = `${entry.id}-${order.symbol}-${order.side}`;
     if (!universe.some(symbol => symbol === order.symbol)) return reject("Simbolo fuori dall’universo operativo Alpaca Paper.");
-    if (!mandatory && approvalTicket !== ticketFor(order, limit)) return reject("Condizioni diverse da quelle approvate. Serve una nuova revisione.");
+    if(mode==="analysis-only") return reject("Modalità di sola analisi.");
+    if(!mandatory && mode!=="legacy" && !plan) return reject("Piano strategico mancante.");
+    if (!mandatory && approvalTicket !== ticketFor(order, limit,plan)) return reject("Condizioni diverse da quelle approvate. Serve una nuova revisione.");
     if (pending.has(id) || intents.some(item => item.id === id)) return explain(`Nessun reinvio per ${id}: intento già registrato.`);
     if (recoveredSides.has(`${order.symbol}/${order.side}`)) return reject("Ordine della sveglia interrotta appena riconciliato.");
     if (uncertainSymbols.has(order.symbol) || (order.side === "buy" && unresolved.size)) return reject("Invio precedente ancora da riconciliare.");
+    if(mode==="approval-required"){
+      const ticket=ticketFor(order,limit,plan);
+      const key=new Bun.CryptoHasher("sha256").update(id+ticket).digest("hex");
+      const expires=Math.min(plan?.expires??Infinity,Date.now()+60000);
+      await state.write("approvals/"+key+".json",{ticket,id,expires});
+      console.log("In attesa di autorizzazione: "+key);
+      let approved=false;
+      while(Date.now()<expires){
+        if(await state.read("permissions/"+key+".json")){approved=true;break;}
+        await Bun.sleep(500);
+      }
+      if(!approved) return reject("Approvazione manuale scaduta.");
+    }
     try {
       const already = await broker.find(id);
       if (already) {
@@ -134,6 +153,17 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       }
       const issue = risk(order, limit, current, entry);
       if (issue) return reject(issue);
+      if(plan){
+        const instant=new Date();
+        if(!allowedStrategies().includes(plan.strategy) || capacity(plan,current,intents,instant)<order.qty)
+          return reject("Scadenza, capitale o rischio cambiati dopo revisione.");
+        const date=newYork(instant).date;
+        const day=(await broker.calendar(date,date))[0];
+        if(!day || !briefingSession([day],current.clock,instant).today) return reject("Calendario non verificato.");
+        const fresh=(await market.charts(instant)).find(c=>c.symbol===order.symbol);
+        const checked=fresh && entryPlan(fresh,day,instant,[plan.strategy]);
+        if(JSON.stringify(checked)!==JSON.stringify(plan)) return reject("Segnale cambiato dopo revisione.");
+      }
       if (!await broker.tradable(order.symbol)) return reject("Titolo non negoziabile su Alpaca Paper.");
     } catch (error) {
       alerts.push(`Verifica broker prima di ${id}: ${errorText(error)}`);
@@ -141,7 +171,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       return reject("Impossibile verificare il broker prima dell’invio.");
     }
 
-    const intent: Intent = { id, order, limit, attemptedAt: new Date().toISOString() };
+    const intent: Intent = { id, order, limit, ...(plan?{plan}:{}), attemptedAt: new Date().toISOString() };
     await state.write(`intents/${id}.json`, intent);
     intents.push(intent);
     lock.intents.push(id);
@@ -192,6 +222,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     alerts.push(newsError);
   }
 
+  if(mode!=="legacy") for(const chart of charts.filter(c=>universe.some(s=>s===c.symbol))) note(chart.symbol+" · setup giornalieri: "+(setups(closedCandles(chart,"1Day",now)).join(", ")||"nessuno"));
   const monitored = [...new Set([...watched, ...charts.map(series => series.symbol)])];
   const newsInput = news && {
     ...news,
@@ -295,10 +326,35 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     }
   }
 
+  const plans=new Map<string,Plan>();
+  if(mode!=="legacy" && snapshot && decision){
+    decision={...decision,orders:[]};
+    try {
+      const date=newYork(now).date;
+      const day=(await broker.calendar(date,date))[0];
+      if(!day || !snapshot.clock.is_open || !trading(entry,snapshot)) explain("Sessione di ingresso chiusa.");
+      else if(newsError || warning || interrupted || unresolved.size || alerts.length) explain("Ingressi sospesi: dati o riconciliazione incompleti.");
+      else {
+        briefingSession([day],snapshot.clock,now);
+        for(const chart of charts){
+          const plan=entryPlan(chart,day,now,allowedStrategies());
+          if(!plan) continue;
+          const qty=capacity(plan,snapshot,intents,now);
+          const reason=`${plan.strategy} · ${plan.source} · candela ${plan.bar} · ingresso ${plan.entry} · stop ${plan.stop} · target 2R ${plan.targets[1]} · quantità ${qty} · perdita teorica ${(qty*(plan.entry-plan.stop)).toFixed(2)} USD · RVOL ${plan.rvol.toFixed(2)}`;
+          if(!qty){explain("Limite di rischio: "+reason);continue;}
+          plans.set(chart.symbol,plan);
+          decision.orders.push({symbol:chart.symbol,side:"buy",qty,reason});
+          explain(reason);
+        }
+        if(!plans.size) explain("Nessun ingresso autorizzato su candela confermata.");
+      }
+    } catch(e){decision.orders=[];reportIssue("Circuit breaker strategia: "+errorText(e));}
+  }
   if (snapshot && decision) {
     for (const [i, order] of decision.orders.entries()) {
       note(`Proposto dal decisore: ${order.symbol} ${order.side} × ${order.qty}. ${order.reason}`);
-      const limit = limitFor(order, charts, now);
+      const plan=plans.get(order.symbol);
+      const limit = plan?.entry ?? limitFor(order, charts, now);
       const issue = risk(order, limit, snapshot, entry);
       if (issue || i >= 5) {
         explain(`Respinto ${order.symbol} ${order.side}: ${issue ?? "Oltre cinque proposte nella stessa sveglia."}`);
@@ -307,13 +363,13 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       try {
         const pertinent = orderReviewContext(order, limit, snapshot, entry,
           charts.find(series => series.symbol === order.symbol), chartAnalysis, newsAnalysis, now);
-        const approval = await reviewOrder(agents, ticketFor(order, limit), pertinent);
+        const approval = await reviewOrder(agents, ticketFor(order, limit,plan), pertinent);
         if (approval.review.verdict !== "approve") {
           explain(`Respinto dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
           continue;
         }
         note(`Approvato dal revisore ${order.symbol} ${order.side}: ${approval.review.reason}`);
-        await execute(order, limit, approval.ticket);
+        await execute(order, limit, approval.ticket,false,plan);
       } catch (error) {
         reportIssue(`Revisione o esecuzione non completata per ${order.symbol}: ${errorText(error)}`);
         note(`Ordine ${order.symbol} ${order.side} non confermato. Vedi l’allarme e il registro degli intenti.`);
