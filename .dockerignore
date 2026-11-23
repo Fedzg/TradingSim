@@ -11,3 +11,5 @@ node_modules
 **/state
 **/state-fake
 **/watchlist.json
+
+**/monitor.env

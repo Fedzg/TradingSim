@@ -1,15 +1,16 @@
+import { publicResponse } from "./provider-cache";
 import { universe, watched } from "./broker";
 import { McpError, payload, type Mcp } from "./mcp";
 import type { State } from "./state";
 
 type Candle = { t: string; o: number; h: number; l: number; c: number; v: number | null };
-export type Series = { symbol: string; source: string; updated: string | null; error?: string; intervalErrors?: Partial<Record<"15Min" | "1Day", string>>; intervals: Record<string, Candle[]> };
+export type Observation = { provider:string; providerSymbol:string; instrumentType:string; venue:string; currency:string; price:number|null; barStart:string|null; session:string; quality:string; delayMinutes:number|null };
+export type Series = { observation?:Observation; symbol: string; source: string; updated: string | null; error?: string; intervalErrors?: Partial<Record<"15Min" | "1Day", string>>; intervals: Record<string, Candle[]> };
 export type Article = { title: string; link: string; source: string; published: string; symbols: string[]; summary: string };
 export type News = { lastSuccess: string | null; checked: string; error?: string; articles: Article[] };
 
 async function json<T>(url: string): Promise<T> {
-  const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(10_000) });
-  if (!response.ok) throw new Error(`Fonte grafici: HTTP ${response.status}`);
+  const response = await publicResponse(new URL(url));
   return response.json() as Promise<T>;
 }
 
@@ -19,7 +20,7 @@ export async function yahoo(symbol: string, range: string, interval: string): Pr
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`,
   );
   const result = data.chart.result?.[0];
-  if (!result || (result.meta?.symbol && result.meta.symbol.toUpperCase() !== symbol.toUpperCase())) throw new Error("Serie assente o simbolo non corrispondente.");
+  if (!result || result.meta?.symbol?.toUpperCase() !== symbol.toUpperCase()) throw new Error("Serie assente o simbolo non corrispondente.");
   const q = result.indicators.quote[0];
   return result.timestamp.flatMap((stamp, i) => {
     const [o, h, l, c, v] = [q.open[i], q.high[i], q.low[i], q.close[i], q.volume?.[i] ?? null];
@@ -37,7 +38,7 @@ export function fakeCharts(now: Date): Series[] {
 }
 
 export class Market {
-  constructor(private mcp: Mcp | undefined, private fake: boolean, private watchlist?: () => Promise<Series[]>) {}
+  constructor(private mcp: Mcp | undefined, private fake: boolean, private watchlist?: () => Promise<Series[]>, private monitor?: (item:{symbol:string;ticker:string;series?:string})=>Promise<Series>) {}
 
   async charts(now: Date): Promise<Series[]> {
     if (this.fake) return fakeCharts(now);
@@ -49,6 +50,7 @@ export class Market {
       });
     }));
     const extras = Promise.all([["USOIL", "CL=F"], ["GBP/USD", "GBPUSD=X"]].map(async ([symbol, ticker]) => {
+      if (this.monitor) return this.monitor({symbol,ticker,series:symbol==="USOIL"?"riferimento WTI continuo":undefined});
       const source = `Yahoo Finance ${ticker}` + (symbol === "USOIL" ? ", futures NYMEX WTI front-month continuo" : "");
       const results = await Promise.allSettled([yahoo(ticker, "5d", "15m"), yahoo(ticker, "3mo", "1d")]);
       const bars = results.map(r => r.status === "fulfilled" ? r.value.slice(-48) : []);

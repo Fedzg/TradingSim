@@ -53,7 +53,7 @@ Vedi [Contribuire](CONTRIBUTING.md#italiano) e [Sicurezza](SECURITY.md#italiano)
 
 Alle 12:30 Europe/Rome lo scheduler crea un briefing informativo separato.
 Avvio manuale: `bun src/cli.ts once --slot 12:30` (aggiungere `--fake` per simulare).
-Il feed indicativo Yahoo può richiedere autorizzazione o non coprire alcuni simboli.
+La copertura dei feed indicativi dipende dal provider e dal piano.
 Per ogni future si confrontano i contratti datati dei prossimi otto mesi con
 scadenza verificata, usando il volume di seduta disponibile. Il cambio di
 contratto è indicato esplicitamente. Ogni analisi usa una sola scadenza.
@@ -61,3 +61,46 @@ Lo stato della sessione dipende dai metadati del singolo mercato.
 Per calendari completi di festività e pause, dati tick e VWAP ufficiali
 servirebbe un feed autorizzato CME/ICE. Per Gold CFD serve il feed del
 broker specifico. I prezzi spot e futures non rappresentano quel CFD.
+
+#### Provider di monitoraggio
+
+La discovery e la watchlist leggono le azioni e gli ETF da Alpaca IEX (con
+controllo del catalogo) e le crypto da Alpaca Crypto. Il simbolo persistente
+BTC-USD o ETH-USD viene tradotto solo nella richiesta al provider. UGL e GLL
+sono ETF a leva giornaliera. Il CFD SPX500_USD mostra solo il sottostante
+S&P 500. Per consultare questi feed in sola lettura usare
+`bun src/cli.ts monitor-check`. Il comando usa la cache e non invia Telegram.
+
+Alle 12:30 i metalli spot usano goldApi.dev e il Forex usa Twelve Data.
+DXY e futures indicativi usano Yahoo Chart v8; il rendimento decennale
+è l'osservazione giornaliera FRED DGS10. Le serie continue dei futures
+restano riferimenti quando il contratto non è identificabile. Per un
+contratto datato servono scadenza verificata, borsa corrispondente e volumi
+della stessa sessione rilevati a distanza massima di cinque minuti.
+È possibile integrare la scadenza mancante con la tabella locale
+`state/futures-calendar.json`, un array con `symbol`, `lastTradeAt`
+(istante con fuso) e `source` (URL della scheda CME verificata).
+Il criterio confronta i contratti del periodo considerato, otto mesi.
+L'OHLC spot e il VWAP possono essere assenti. I periodi senza barre
+consecutive sufficienti sono segnalati. Calendari o pause non confermati
+restano esplicitamente non verificabili.
+
+Configurazione Windows: creare `monitor.env` **nella directory privata
+già indicata da TRADINGSIM_SECRETS_DIR**, con le stesse ACL ristrette dei
+segreti Alpaca. Compose lo legge facoltativamente. Impostare localmente
+`TWELVE_DATA_API_KEY` e `GOLDAPI_KEY`. Per goldApi.dev impostare anche
+`GOLDAPI_URL_TEMPLATE` con l'endpoint HTTPS USD indicato dal proprio piano,
+inserendo `{metal}` al posto di XAU o XAG. Il worker accetta goldapi.dev e
+api.goldapi.dev. Il nome dell'header chiave è configurabile con
+`GOLDAPI_AUTH_HEADER` (default X-API-Key). Il parser richiede identità del
+metallo, valuta USD, prezzo e timestamp nella risposta JSON o nel campo data.
+Verificare endpoint, formato, condizioni d'uso e quota nel pannello del piano.
+Non inviare chiavi in chat. Il briefing spot usa al massimo due richieste al
+giorno per impostazione predefinita. Twelve Data è limitato localmente a
+8 richieste al minuto e 800 al giorno; ridurre `TWELVE_DATA_DAILY_LIMIT`
+e `GOLDAPI_DAILY_LIMIT` secondo il piano e l'uso da altre applicazioni.
+Le statistiche persistenti sono in `state/providers/{alpaca,twelve,gold,yahoo,fred}.json`.
+
+Documentazione: [Twelve Data](https://twelvedata.com/docs),
+[goldApi.dev](https://goldapi.dev), [FRED DGS10](https://fred.stlouisfed.org/series/DGS10),
+[termini Yahoo](https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html).

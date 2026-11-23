@@ -26,11 +26,19 @@ type Registry = {
 
 const path = "watchlist.json";
 const registry = async (state: State): Promise<Registry> => await state.read<Registry>(path) ?? { watchlist: {} };
-const requestId = (item: Instrument) => createHash("sha256").update(JSON.stringify([item.category, item.venue, item.symbol])).digest("hex").slice(0, 24);
+const legacyCryptoVenue = "Yahoo Finance, aggregato spot USD";
+const isAlpacaPair = (item:Instrument) => item.category==="crypto" && ["BTC-USD","ETH-USD"].includes(item.symbol);
+// The persisted approval and watchlist keys predate the change of crypto feed.
+const requestId = (item: Instrument) => {
+  const venue = isAlpacaPair(item) && item.venue==="Alpaca Crypto US" ? legacyCryptoVenue : item.venue;
+  return createHash("sha256").update(JSON.stringify([item.category,venue,item.symbol])).digest("hex").slice(0,24);
+};
 const trim = (text: string) => text.slice(0, 430);
 
 export async function savedWatchlist(state: State) {
-  return Object.values((await registry(state)).watchlist).map(entry => entry.instrument);
+  return Object.values((await registry(state)).watchlist).map(({instrument}) =>
+    isAlpacaPair(instrument) && instrument.venue===legacyCryptoVenue ?
+      {...instrument,venue:"Alpaca Crypto US",ticker:instrument.symbol.replace("-","/")} : instrument);
 }
 
 function sourcesFor(candidate: Candidate, articles: Article[], now: Date): Sources {

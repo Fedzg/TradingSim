@@ -69,9 +69,25 @@ See [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md).
 
 At 12:30 Europe/Rome the scheduler sends a read-only gold, commodities and FX
 briefing. Run it manually with `bun src/cli.ts once --slot 12:30 --fake`
-for a simulation. It uses timestamped indicative Yahoo data and cached news.
+for a simulation. It uses timestamped indicative market data and cached news.
 For futures it compares volumes among dated, unexpired contracts in an
 eight-month window and reports contract changes. Brent refers to NYMEX BZ.
 Coverage, quote delay and session status depend on the provider. A licensed
 venue feed can supply detailed holiday and maintenance schedules. A Gold CFD
 requires its own broker quote. Missing data is identified in the report.
+
+The 12:30 report now uses goldApi.dev for spot metals, Twelve Data for FX,
+Yahoo Chart v8 for indicative futures and DXY, and the daily FRED DGS10
+observation for US Treasury yields. Discovery uses Alpaca IEX and Alpaca
+Crypto. BTC-USD and ETH-USD retain their existing watchlist identities.
+Use `bun src/cli.ts monitor-check` to check discovery coverage without
+placing orders or sending Telegram messages. Provider counters and caches
+are stored in the state volume. Continuous futures do not identify a
+tradable contract. Missing or incomparable expiry/volume data is reported.
+
+Create an optional `monitor.env` beside the existing private Alpaca secrets
+and restrict its permissions. Set `TWELVE_DATA_API_KEY`, `GOLDAPI_KEY` and
+the account-documented USD `GOLDAPI_URL_TEMPLATE` containing `{metal}`.
+Confirm the key header, response schema, usage terms and request allowances
+against your accounts before deployment. See the [configuration details and
+provider references](README.it.md#provider-di-monitoraggio).

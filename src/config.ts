@@ -21,7 +21,7 @@ export async function config(fake: boolean) {
     throw new Error("Configurazione Telegram non valida. Verifica TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.");
   }
   const telegram = token ? { token, chatId } : undefined;
-  const values = [key, secret, token].filter(Boolean);
+  const values = [key, secret, token, process.env.GOLDAPI_KEY, process.env.TWELVE_DATA_API_KEY].filter(Boolean);
   const redact = (value: string) => values.reduce((result, credential) => result.replaceAll(credential, "[omesso]"), value);
   return { key, secret, telegram, redact, root: resolve(process.env.TRADINGSIM_STATE_DIR || ".", fake ? "state-fake" : "state") };
 }

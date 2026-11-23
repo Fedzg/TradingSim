@@ -6,7 +6,8 @@ import { closeCalendar, closeDue, closeReportId, dailyClose, type CloseSchedule 
 import { Discovery, savedWatchlist } from "./discovery";
 import { measureAgents, measureFeed } from "./efficiency-metrics";
 import { chartContext } from "./indicators";
-import { readSeries, scan } from "./discovery-sources";
+import { MonitorFeeds } from "./monitor-feeds";
+import { catalog, scan } from "./discovery-sources";
 import { chartScenarios } from "./chart-scenarios";
 import { enqueue, FakeChannel, UnavailableChat, type Message } from "./chat";
 import { AlpacaStdio } from "./mcp";
@@ -16,7 +17,7 @@ import { queueNewsSignals } from "./news-signals";
 import { run } from "./run";
 import { State } from "./state";
 import { TelegramChannel } from "./telegram";
-import { goldBriefing } from "./gold-briefing";
+import { buildGoldReport, goldBriefing } from "./gold-briefing";
 import { newYork, scheduledSlots, nextWake, rome, slots, wake, type Slot } from "./time";
 
 const bun = process.execPath;
@@ -32,6 +33,8 @@ const scheduledDate = dateIndex < 0 ? undefined : flags[dateIndex + 1];
 const opts = await config(fake);
 const state = new State(opts.root);
 const mcp = fake ? undefined : new AlpacaStdio(opts.key, opts.secret);
+const feeds = new MonitorFeeds(state,mcp);
+const readSeries = feeds.series.bind(feeds);
 const market = new Market(mcp, fake);
 const marketWithWatchlist = async () => {
   if (fake) return market;
@@ -39,7 +42,7 @@ const marketWithWatchlist = async () => {
   return new Market(mcp, false, () => Promise.all(watchlist.map(async item => {
     try { return await readSeries(item); }
     catch { return { symbol: item.symbol, source: item.venue, updated: null, intervals: {}, error: "Fonte watchlist indisponibile" }; }
-  })));
+  })), readSeries);
 };
 const telegram = opts.telegram && new TelegramChannel(opts.telegram.token, opts.telegram.chatId);
 const channel = fake ? new FakeChannel(state, process.env.TRADINGSIM_FAKE_CHAT_FAIL === "1") : telegram ?? new UnavailableChat();
@@ -253,9 +256,20 @@ try {
       console.log(opts.redact(JSON.stringify({ scanAt, coverage, watchlist: await savedWatchlist(state), revisioni }, null, 2)));
       break;
     }
+    case "monitor-check": {
+      if (fake) throw new Error("Usa bun test per le verifiche offline dei provider.");
+      console.log(opts.redact((await buildGoldReport(state,new Date(),false)).text));
+      for (const item of catalog) {
+        try {
+          const series=await readSeries(item);
+          console.log(JSON.stringify({symbol:item.symbol,...series.observation,error:series.error}));
+        } catch { console.log(JSON.stringify({symbol:item.symbol,error:"catalogo o feed non verificabile"})); }
+      }
+      break;
+    }
     case "discovery-scan": {
       if (fake) throw new Error("La scansione offline si verifica con bun test.");
-      console.log(JSON.stringify(await scan(new Date()), null, 2));
+      console.log(JSON.stringify(await scan(new Date(), readSeries), null, 2));
       break;
     }
     case "watchlist-pending": {
@@ -280,12 +294,12 @@ try {
     }
     case "_discover": {
       const model = measureAgents("discovery", fake ? new FakeAgents() : new CodexAgents(opts.redact));
-      const engine = new Discovery(state, model.agents, opts.redact);
+      const engine = new Discovery(state, model.agents, opts.redact, readSeries);
       const { scanAt } = await engine.status();
       const now = new Date();
       try {
         if (!scanAt || +now - Date.parse(scanAt) >= 15 * 60_000) {
-          const source = fake ? async (item: { symbol: string }) => ({ ...fakeCharts(now)[0], symbol: item.symbol }) : undefined;
+          const source = fake ? async (item: { symbol: string }) => ({ ...fakeCharts(now)[0], symbol: item.symbol }) : readSeries;
           const result = await measureFeed("discovery", () => scan(now, source));
           await engine.collect(result, (await market.cachedNews(state)).articles, now);
         }

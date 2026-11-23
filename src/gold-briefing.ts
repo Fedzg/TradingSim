@@ -2,7 +2,8 @@ import { enqueue, outboxId } from "./chat";
 import { verifyEvents } from "./event-news";
 import type { NewsAnalysis } from "./agents";
 import { pct, rsi14 } from "./indicators";
-import { yahoo, type News, type Series } from "./market";
+import { MonitorFeeds, freshness, type Quote } from "./monitor-feeds";
+import { type News, type Series } from "./market";
 import type { State } from "./state";
 import { rome } from "./time";
 
@@ -12,12 +13,9 @@ const instruments = [
   ["MATERIE PRIME","XAG/USD","Spot OTC","XAGUSD=X"], ["MATERIE PRIME","WTI CL","NYMEX","CL","NYM"],
   ["MATERIE PRIME","WTI MCL","NYMEX","MCL","NYM"], ["MATERIE PRIME","Brent BZ","NYMEX","BZ","NYM"],
   ["FOREX E MACRO","EUR/USD","Spot OTC","EURUSD=X"], ["FOREX E MACRO","GBP/USD","Spot OTC","GBPUSD=X"],
-  ["FOREX E MACRO","DXY","Indice dollaro ICE","DX-Y.NYB"], ["FOREX E MACRO","Treasury USA 10Y","Rendimento %","^TNX"],
+  ["FOREX E MACRO","USD/JPY","Spot OTC","JPY=X"], ["FOREX E MACRO","DXY","Indice dollaro ICE","DX-Y.NYB"], ["FOREX E MACRO","Treasury USA 10Y","Rendimento %","^TNX"],
 ] as const;
 
-type Quote = { symbol: string; regularMarketPrice: number; regularMarketTime: number; regularMarketVolume?: number;
-  regularMarketPreviousClose?: number; regularMarketVwap?: number; regularMarketDayHigh?: number; regularMarketDayLow?: number;
-  exchangeDataDelayedBy?: number; marketState?: string; expireDate?: number; currency?: string };
 const positive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 const fmt = (v: number) => Number(v.toPrecision(6)).toLocaleString("it-IT", { maximumFractionDigits: 6 });
 const months = "FGHJKMNQUVXZ";
@@ -33,30 +31,20 @@ export function activeContract(quotes: Quote[], now: Date) {
     && +now - q.regularMarketTime * 1000 < 4 * 86400_000)
     .sort((a,b) => b.regularMarketVolume! - a.regularMarketVolume! || a.expireDate! - b.expireDate!)[0];
 }
-async function readQuotes(symbols: string[]): Promise<Quote[]> {
-  const res = await fetch("https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(symbols.join(",")),
-    { redirect: "error", signal: AbortSignal.timeout(8000) });
-  if (!res.ok) throw new Error("Feed quotazioni non disponibile");
-  const data = await res.json();
-  return data.quoteResponse.result.filter((q: Quote) => symbols.includes(q.symbol));
-}
-
-// The chart endpoint can supply a timestamped indicative quote when the batch feed is unavailable.
-async function chartQuote(symbol: string): Promise<Quote | undefined> {
-  const response = await fetch("https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(symbol)+"?range=1d&interval=15m", {
-    redirect: "error", signal: AbortSignal.timeout(6000),
-  });
-  if (!response.ok) return;
-  const meta = (await response.json()).chart?.result?.[0]?.meta;
-  if (meta?.symbol !== symbol) return;
-  return { ...meta, regularMarketPreviousClose: meta.previousClose ?? meta.chartPreviousClose };
-}
-
 type Bar = Series["intervals"][string][number];
 export function technical(bars: Bar[], minutes: number, now: Date) {
   const duration = minutes * 60_000;
   const clean = bars.filter(b => [b.c,b.l,b.h,b.o].every(positive) && b.h >= Math.max(b.o,b.c,b.l) &&
     b.l <= Math.min(b.o,b.c) && Date.parse(b.t) + duration <= +now);
+  // Restart the sample at a gap, including venue breaks without verified bars.
+  let start = 0;
+  for (let i=1; i<clean.length; i++) {
+    const gap=Date.parse(clean[i].t)-Date.parse(clean[i-1].t);
+    const weekend=minutes===1440 && new Date(clean[i-1].t).getUTCDay()===5 && new Date(clean[i].t).getUTCDay()===1;
+    const expected=weekend?3*duration:duration;
+    if (gap!==expected && !(minutes===1440 && Math.abs(gap-expected)===3600000)) start=i;
+  }
+  clean.splice(0,start);
   const last = clean.at(-1);
   if (!last || +now - Date.parse(last.t) > (minutes === 1440 ? 5 * 86400_000 : duration * 3) ||
       clean.length < 21 || clean.some((b,i) => i > 0 && b.t <= clean[i-1].t)) return;
@@ -98,13 +86,13 @@ async function headlines(state: State, now: Date) {
   return lines.length ? lines : ["Nessuna notizia pertinente verificata."];
 }
 
-export async function goldBriefing(state: State, now: Date, fake: boolean, redact: (s: string)=>string) {
+export async function buildGoldReport(state: State, now: Date, fake: boolean) {
   const { date } = rome(now);
-  if (await state.read("outbox/"+outboxId("gold",date)+".json")) return;
   const rows = instruments.map(([section,name,venue,ticker,exchange]) => ({ section,name,venue,exchange,
     symbols: exchange ? contracts(ticker,exchange,now) : ticker ? [ticker] : [] }));
   const quotes = fake ? await state.read<Quote[]>("fake-gold-quotes.json") ?? [] :
-    await readQuotes(rows.flatMap(row=>row.symbols)).catch(()=>[]);
+    [];
+  const feeds = new MonitorFeeds(state);
   const text = [`${date} · 12:30 Europe/Rome${fake ? " · SIMULAZIONE" : ""}`];
   const next: string[] = [];
   const selected: Record<string,string> = {};
@@ -114,36 +102,61 @@ export async function goldBriefing(state: State, now: Date, fake: boolean, redac
     if (section !== row.section) { section = row.section; text.push("",section); }
     const candidates = quotes.filter(q=>row.symbols.includes(q.symbol));
     let q = row.exchange ? activeContract(candidates,now) : candidates[0];
-    if (!q && !fake && !row.exchange && row.symbols.length) {
-      q = await chartQuote(row.symbols[0]).catch(() => undefined);
+    let problem = "";
+    if (!fake && row.symbols.length) {
+      try {
+        if (row.exchange) {
+          const root = row.name.split(" ").at(-1)!;
+          const reference = await feeds.yahooQuote(root+"=F").catch(()=>undefined);
+          const contracts = await feeds.datedContracts(row.symbols,now);
+          q = activeContract(contracts,now) ?? reference;
+        } else if (row.name==="XAU/USD" || row.name==="XAG/USD") q=await feeds.metal(row.name);
+        else if (["EUR/USD","GBP/USD","USD/JPY"].includes(row.name)) {
+          const bars=await feeds.forex(row.name,"15min");
+          const last=bars.filter(b=>Date.parse(b.t)+900000<=+now).at(-1);
+          if (last) q={symbol:row.name,provider:"Twelve Data · chiusura 15 min",currency:row.name.slice(-3),
+            regularMarketPrice:last.c,regularMarketTime:(Date.parse(last.t)+900000)/1000};
+        } else if (row.name==="Treasury USA 10Y") q=await feeds.treasury();
+        else q=await feeds.yahooQuote(row.symbols[0]);
+      } catch (e) { problem = e instanceof Error && /^(Feed |Chiave |Endpoint )/.test(e.message) ? " · "+e.message : " · fonte indisponibile"; }
     }
     const label = row.name+" · "+row.venue;
     if (!q || !positive(q.regularMarketPrice) || !positive(q.regularMarketTime) || q.regularMarketTime*1000 > +now) {
-      text.push(label+" · "+(row.exchange ? "contratto attivo e prezzo non verificabili" : "quotazione non verificabile")); continue;
+      text.push(label+" · "+(row.exchange ? "contratto attivo e prezzo non verificabili" : "quotazione non verificabile")+problem); next.push(row.name+" · ricontrollare disponibilità"); continue;
     }
     const age = +now-q.regularMarketTime*1000;
     const stamp = new Date(q.regularMarketTime*1000).toISOString();
-    const delay = age > 20*60_000 ? "dato datato" : q.exchangeDataDelayedBy === 0 ? "real-time dichiarato" :
+    const maxAge = (q.observationDate ? freshness.daily : row.exchange ? freshness.futures : row.name.startsWith("XA") ? freshness.spot : freshness.forex)*60_000;
+    const delay = age > maxAge ? "dato datato" : q.exchangeDataDelayedBy === 0 ? "real-time dichiarato" :
       positive(q.exchangeDataDelayedBy) ? "ritardo "+q.exchangeDataDelayedBy+" min" : "latenza non verificabile";
+    const withinWindow = q.sessionStart && q.sessionEnd && q.sessionStart*1000<=+now && +now<q.sessionEnd*1000 &&
+      q.regularMarketTime>=q.sessionStart;
     const session = age <= 20*60_000 && q.marketState === "REGULAR" ? "aperta secondo il feed" :
-      q.marketState === "CLOSED" ? "chiusa secondo il feed" : "sessione non verificabile";
-    text.push(`${label} · Yahoo ${q.symbol} · ${fmt(q.regularMarketPrice)} ${row.name.includes("10Y") ? "%" : q.currency ?? ""} · ${stamp} · ${delay} · ${session}`);
-    if (row.exchange) {
+      q.marketState === "CLOSED" ? "chiusa secondo il feed" : withinWindow ? "finestra di seduta; apertura non confermata" : "sessione non verificabile";
+    text.push(`${label} · ${q.provider ?? "Yahoo"} ${q.symbol} · ${fmt(q.regularMarketPrice)} ${row.name.includes("10Y") ? "%" : q.currency ?? ""} · ${q.observationDate ?? stamp} · ${delay} · ${session}`);
+    if (q.continuous) text.push("Serie continua indicativa. Contratto attivo e scadenza non verificati.");
+    if (q.bid && q.ask) text.push("Bid/ask "+fmt(q.bid)+"/"+fmt(q.ask));
+    if (row.exchange && !q.continuous) {
       selected[row.name] = q.symbol;
       text.push("Scadenza "+new Date(q.expireDate!*1000).toISOString().slice(0,10));
       if (previous[row.name] && previous[row.name] !== q.symbol) text.push(`Rollover ${previous[row.name]} → ${q.symbol}. Serie separate.`);
     }
     if (positive(q.regularMarketPreviousClose)) text.push("Variazione giornaliera "+fmt(pct(q.regularMarketPreviousClose,q.regularMarketPrice))+"%");
-    if (section !== "GOLD" || age > 20*60_000) continue;
+    const forex = q.provider?.startsWith("Twelve Data");
+    if ((section !== "GOLD" && !forex) || age > maxAge) continue;
     if (positive(q.regularMarketDayLow) && positive(q.regularMarketDayHigh)) text.push(`Min/max seduta ${fmt(q.regularMarketDayLow)}–${fmt(q.regularMarketDayHigh)}`);
     if (row.exchange && positive(q.regularMarketVolume)) {
       text.push("Volume seduta "+fmt(q.regularMarketVolume));
       if (positive(q.regularMarketVwap)) text.push("VWAP seduta "+fmt(q.regularMarketVwap));
     }
+    if (q.continuous || q.provider==="goldApi.dev") {
+      text.push(q.continuous ? "Indicatori sospesi: rollover della serie continua non verificabile." : "OHLC spot non disponibili.");
+      continue;
+    }
     const frames = [["15m","5d",15],["1h","1mo",60],["1d","3mo",1440]] as const;
     const fixture = fake ? await state.read<Record<string,Bar[]>>("fake-gold-bars.json") : undefined;
     const indicators = await Promise.all(frames.map(async ([interval,range,min]) => {
-      const bars = fake ? fixture?.[q.symbol+"/"+interval] ?? [] : await yahoo(q.symbol,range,interval).catch(()=>[]);
+      const bars = fake ? fixture?.[q.symbol+"/"+interval] ?? [] : forex ? await feeds.forex(row.name,interval==="15m"?"15min":interval==="1d"?"1day":"1h").catch(()=>[]) : await feeds.yahooBars(q.symbol,range,interval).catch(()=>[]);
       return technical(bars,min,now);
     }));
     for (const [i, result] of indicators.entries()) {
@@ -157,10 +170,17 @@ export async function goldBriefing(state: State, now: Date, fake: boolean, redac
       }
     }
   }
-  if (!text.some(line => line.startsWith("VWAP seduta"))) text.push("VWAP seduta non verificabile.");
+  if (!text.some(line => line.startsWith("VWAP seduta"))) text.splice(text.indexOf("MATERIE PRIME")-1,0,"VWAP seduta non verificabile.");
   text.push("", "NOTIZIE", ...await headlines(state,now),
     "", "PROSSIMO CONTROLLO", ...(next.length ? next : ["Verificare nuovi prezzi, sessioni e livelli dell’oro."]),
     "", "OPERAZIONI", "Nessun ordine inviato: briefing informativo.");
-  await enqueue(state,date,"gold",redact(text.join("\n")),date,"gold-report");
-  await state.write("gold-contracts.json",{...previous,...selected});
+  return { text:text.join("\n"), contracts:{...previous,...selected} };
+}
+
+export async function goldBriefing(state: State, now: Date, fake: boolean, redact: (s:string)=>string) {
+  const {date}=rome(now);
+  if (await state.read("outbox/"+outboxId("gold",date)+".json")) return;
+  const report=await buildGoldReport(state,now,fake);
+  await enqueue(state,date,"gold",redact(report.text),date,"gold-report");
+  await state.write("gold-contracts.json",report.contracts);
 }

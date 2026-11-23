@@ -10,6 +10,8 @@ services:
     env_file:
       - path: "${TRADINGSIM_SECRETS_DIR:-/run/tradingsim-secrets}/telegram.env"
         required: false
+      - path: "${TRADINGSIM_SECRETS_DIR:-/run/tradingsim-secrets}/monitor.env"
+        required: false
     environment:
       ALPACA_PAPER_TRADE: "true"
       APCA_API_KEY_ID_FILE: /run/secrets/alpaca-key
