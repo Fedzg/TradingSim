@@ -245,7 +245,7 @@ try {
         await enqueue(state, `${date}-${time.replace(":", "")}-news`, "allarmi",
           opts.redact(`⚠ ${news.error} Ultimo aggiornamento: ${news.lastSuccess ?? "assente"}.`));
       }
-      console.log(`Monitor notizie: ${news.error ?? `${news.articles.length} articoli in cache`}; ultimo aggiornamento ${news.lastSuccess ?? "assente"}.`);
+      console.log(`Monitor notizie: ${news.error ?? `${news.articles.length} articoli in cache`}; ultimo aggiornamento ${news.lastSuccess ?? "assente"}${news.edgar ? "; EDGAR " + news.edgar : ""}.`);
       if (!fake && !news.error) {
         try {
           const model = measureAgents("news", new CodexAgents(opts.redact));

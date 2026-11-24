@@ -1,4 +1,5 @@
 import {intradayTime} from "./bar-time";
+import { edgarUserAgent, issuers, secData, fundamentals } from "./edgar";
 import {breakerOpen, confirms, manualPermission, recordHealth, strategyAlert} from "./strategy-controls";
 import {allowedStrategies,capacity,entryPlan,executionMode,setups,type Plan} from "./strategies";
 import {closedCandles} from "./indicators";
@@ -402,8 +403,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       try {
         const pertinent = orderReviewContext(order, limit, snapshot, entry,
           charts.find(series => series.symbol === order.symbol), chartAnalysis, newsAnalysis, now);
-        if(plan && !simulated && process.env.TRADINGSIM_SEC_USER_AGENT){
-          const {issuers,secData,fundamentals}=await import("./edgar");
+        if(plan && !simulated && edgarUserAgent()){
           if(Object.hasOwn(issuers,order.symbol)){
             const issuer=order.symbol as keyof typeof issuers;
             try {Object.assign(pertinent.evidence,{fundamentals:fundamentals(issuer,await secData(state,issuer,true),now)});}

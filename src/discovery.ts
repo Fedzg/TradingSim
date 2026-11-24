@@ -8,20 +8,25 @@ import { readSeries, trend, type scan, type Candidate, type Evidence, type Instr
 import type { Article } from "./market";
 import type { State } from "./state";
 import { reviewEvidence } from "./discovery-review-source";
+import { producer } from "./version";
 
 type Finding = { verdict: "approve" | "reject"; reason: string; doubt: string; sourceIds: string[] };
 type Sources = EvidenceSet;
-type CachedAnalysis = { candidate: Candidate; sources: Sources; analyzedAt: string; news: Finding; charts: Finding };
+type Producer = typeof producer;
+type CachedAnalysis = { candidate: Candidate; sources: Sources; analyzedAt: string; news: Finding; charts: Finding; producer?: Producer };
 type Challenge = { newsQuestion: string; chartsQuestion: string; objection: string };
 type Proposal = {
   candidate: Candidate; sources: Sources; news: Finding; charts: Finding; status: "pending" | "approved" | "rejected" | "added";
   challenge?: Challenge; newsAnswer?: Finding; chartsAnswer?: Finding; reason?: string; checkedAt?: string; failures?: number;
+  producer?: Producer;
+  challengeProducer?: Producer; newsAnswerProducer?: Producer; chartsAnswerProducer?: Producer; decisionProducer?: Producer;
 };
 type Registry = {
   proposals?: Record<string, Proposal>;
   analysisCache?: Record<string, CachedAnalysis>;
   scanAt?: string; coverage?: Awaited<ReturnType<typeof scan>>["coverage"];
-  watchlist: Record<string, { instrument: Instrument; addedAt: string; notice?: string }>;
+  scanProvenance?: { at: string; producer: Producer };
+  watchlist: Record<string, { instrument: Instrument; addedAt: string; notice?: string; producer?: Producer }>;
 };
 
 const path = "watchlist.json";
@@ -115,9 +120,9 @@ export class Discovery {
         return;
       }
       const analyzedAt = now.toISOString();
-      cache[id] = { candidate, sources, news: news.value, charts: charts.value, analyzedAt };
+      cache[id] = { candidate, sources, news: news.value, charts: charts.value, analyzedAt, producer };
       if (news.value.verdict === "approve" && charts.value.verdict === "approve") {
-        proposals[id] = { candidate, sources, news: news.value, charts: charts.value, status: "pending" };
+        proposals[id] = { candidate, sources, news: news.value, charts: charts.value, status: "pending", producer };
       } else if (proposals[id]?.status === "pending") {
         delete proposals[id];
       }
@@ -137,6 +142,7 @@ export class Discovery {
     }
     metric("budget.discovery",{reserved:admitted.length*2,deferred:work.length-admitted.length});
     data.scanAt = now.toISOString();
+    data.scanProvenance = { at: data.scanAt, producer };
     await this.state.write(path, data);
     metric("analysis.discovery-cache", { ...counts, causes, elapsedMs: elapsed(started) });
   }
@@ -168,6 +174,7 @@ export class Discovery {
       if (proposal.failures >= 3) {
         proposal.status = "rejected";
         proposal.reason = "Revisione indisponibile dopo tre tentativi.";
+        proposal.decisionProducer = producer;
       }
       await this.state.write(path, data);
       if (proposal.status === "approved") throw error;
@@ -179,6 +186,7 @@ export class Discovery {
     const reject = async (reason: string) => {
       proposal.status = "rejected";
       proposal.reason = this.redact(reason);
+      proposal.decisionProducer = producer;
       await save();
     };
     const { candidate, sources } = proposal;
@@ -198,16 +206,19 @@ export class Discovery {
         detail: `Giorno ${fresh.dayPct.toFixed(2)}%, ora ${fresh.hourPct.toFixed(2)}%, volume relativo ${fresh.volumeMultiple ?? "non disponibile"}, invalidazione ${fresh.invalidation}.` };
       sources.indipendente = independent;
       proposal.challenge = await ask<Challenge>(this.agents, "discoveryChallenge", { candidate: candidateSummary, sources, initial: [proposal.news, proposal.charts] });
+      proposal.challengeProducer = producer;
       proposal.checkedAt = fresh.at;
       await save();
     }
     const context = { candidate: candidateSummary, challenge: proposal.challenge, initial: [proposal.news, proposal.charts] };
     if (!proposal.newsAnswer) {
       proposal.newsAnswer = await find(this.agents, "discoveryNewsAnswer", context, sources);
+      proposal.newsAnswerProducer = producer;
       await save();
     }
     if (!proposal.chartsAnswer) {
       proposal.chartsAnswer = await find(this.agents, "discoveryChartsAnswer", context, sources, "aggiornato");
+      proposal.chartsAnswerProducer = producer;
       await save();
     }
     const veto = [proposal.newsAnswer, proposal.chartsAnswer].find(answer => answer.verdict === "reject");
@@ -218,12 +229,13 @@ export class Discovery {
     if (result.verdict === "reject") return reject(result.reason);
     proposal.status = "added";
     proposal.reason = this.redact(trim(result.reason));
+    proposal.decisionProducer = producer;
     const notice = this.redact([
       `${candidate.instrument.symbol} · ${candidate.instrument.category}`,
       "Aggiunto alla watchlist. Solo monitoraggio.",
       `Motivo finale: ${trim(result.reason)}`,
     ].join("\n"));
-    data.watchlist[id] = { instrument: candidate.instrument, addedAt: now.toISOString(), notice };
+    data.watchlist[id] = { instrument: candidate.instrument, addedAt: now.toISOString(), notice, producer };
     await save();
   }
 

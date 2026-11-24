@@ -13,6 +13,7 @@ import { orderReviewContext } from "../src/order-review-context";
 import { ticketFor } from "../src/risk";
 import { State, type Baton } from "../src/state";
 import { wake } from "../src/time";
+import { producer } from "../src/version";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -54,9 +55,11 @@ test("quattro scansioni distinte e riavvio: due chiamate anche se avanza la cand
   expect(f.calls).toEqual(["discoveryNews", "discoveryCharts"]);
   expect(await f.discovery().proposals()).toHaveLength(1);
   expect(await f.state().list("outbox")).toEqual([]);
-  const { analysisCache } = (await f.state().read<any>("watchlist.json"))!;
+  const { analysisCache, scanProvenance } = (await f.state().read<any>("watchlist.json"))!;
   const record = Object.values(analysisCache)[0] as any;
   expect(record.analyzedAt).toBe(at(0).toISOString());
+  expect(record.producer).toEqual(producer);
+  expect(scanProvenance).toEqual({ at: at(45).toISOString(), producer });
   expect(record.sources.mercato.url).toBe(candidate(at(0)).market.url);
   expect(record.candidate.metrics.dayPct).toBe(2.4);
 });

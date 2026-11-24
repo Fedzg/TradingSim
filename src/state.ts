@@ -21,11 +21,13 @@ export class State {
   }
 
   async write(name: string, value: unknown, once = false) {
-    if (/^(history\/|logs\/|outbox\/|intents\/|health\/|strategy-actions\/|strategy-health\/|baton\.json$|news\.json$)/.test(name) &&
-        value && typeof value==="object" && !Array.isArray(value) && !("producer" in value)) {
-      const previous=await this.read<{producer?:typeof producer}>(name).catch(()=>undefined);
-      if(!previous || !/^(outbox|intents)\//.test(name)) value={...value,producer};
-      else if(previous.producer) value={...value,producer:previous.producer};
+    if (/^(history\/|logs\/|outbox\/|intents\/|health\/|strategy-actions\/|strategy-health\/|strategy-closed\/|providers\/|budgets\/|approvals\/|permissions\/|baton\.json$|news\.json$|wake-news-analysis\.json$|news-signals\.json$|close-calendar\.json$|gold-contracts-provenance\.json$|run\.lock$)/.test(name) &&
+        value && typeof value === "object" && !Array.isArray(value)) {
+      if (!/^(outbox|intents)\//.test(name)) value = { ...value, producer };
+      else if (!("producer" in value)) {
+        const previous = await this.read<{ producer?: typeof producer }>(name).catch(() => undefined);
+        if (!previous || previous.producer) value = { ...value, producer: previous?.producer ?? producer };
+      }
     }
     const path = this.path(name);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });

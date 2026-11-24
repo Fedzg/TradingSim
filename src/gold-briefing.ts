@@ -18,6 +18,7 @@ const instruments = [
 
 const positive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 const fmt = (v: number) => Number(v.toPrecision(6)).toLocaleString("it-IT", { maximumFractionDigits: 6 });
+const goldFrames = [["15m","5d",15],["1h","1mo",60],["1d","3mo",1440]] as const;
 const months = "FGHJKMNQUVXZ";
 function contracts(root: string, exchange: string, now: Date) {
   return Array.from({ length: 8 }, (_, i) => {
@@ -64,6 +65,12 @@ export function technical(bars: Bar[], minutes: number, now: Date) {
   return { high, low, signal, atr, rsi: rsi14(closes)!, fast: sma(5), slow: sma(20) };
 }
 
+function untimedMetal(quote: Quote, label: string, price: string) {
+  const reception = quote.receivedAt ? " · risposta ricevuta " + quote.receivedAt :
+    quote.responseAt ? " · aggiornamento dichiarato dal provider " + quote.responseAt : "";
+  return `${label} · goldApi.dev · ${price} USD${reception} · ora della quotazione e freschezza non verificabili.`;
+}
+
 const macro = /\b(gold|silver|bullion|crude|oil|opec|federal reserve|fed|inflation|cpi|payrolls?|employment|dollar|treasury|central bank|geopolitic\w*|sanctions?|ceasefire|oil inventories)\b/i;
 async function headlines(state: State, now: Date) {
   const news = await state.read<News>("news.json");
@@ -93,6 +100,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
   const quotes = fake ? await state.read<Quote[]>("fake-gold-quotes.json") ?? [] :
     [];
   const feeds = new MonitorFeeds(state,undefined,true);
+  const fixture = fake ? await state.read<Record<string,Bar[]>>("fake-gold-bars.json") : undefined;
   const text = [`${date} · 12:30 Europe/Rome${fake ? " · SIMULAZIONE" : ""}`];
   const next: string[] = [];
   const selected: Record<string,string> = {};
@@ -120,12 +128,29 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
     const decimals=row.name==="USD/JPY"?3:["GBP/USD","EUR/USD"].includes(row.name)?5:2;
     const price=(v:number)=>v.toLocaleString("it-IT",{minimumFractionDigits:decimals,maximumFractionDigits:decimals});
     const label = row.name+" · "+row.venue;
-    if (q?.responseAt && !q.regularMarketTime) {
-      text.push(label+" · "+q.provider+" · "+price(q.regularMarketPrice)+" USD · risposta "+q.responseAt+" · freschezza del prezzo non verificabile.");
+    const xau = row.name === "XAU/USD";
+    const showSpotBars = async () => {
+      if (!xau) return;
+      const bars = fake ? (fixture?.["XAU/USD/15m"] ?? fixture?.["XAUUSD=X/15m"] ?? []) :
+        await feeds.forex("XAU/USD", "15min").catch(() => []);
+      if (!bars.length) { text.push("OHLC spot XAU/USD · Twelve Data 15m · non disponibili."); return; }
+      const result = technical(bars, 15, now);
+      if (!result) { text.push("OHLC spot XAU/USD · Twelve Data 15m · barre disponibili, indicatori non verificabili."); return; }
+      const { fast, slow, atr, rsi, high, low, signal } = result;
+      text.push(`OHLC spot XAU/USD · Twelve Data 15m · SMA5/20 ${fmt(fast)}/${fmt(slow)} · RSI14 ${rsi.toFixed(1)} · ATR14 ${fmt(atr)} · ${signal}.`);
+      next.push(`XAU/USD: verificare la chiusura 15m rispetto a ${fmt(low)} e ${fmt(high)}.`);
+    };
+    if (q?.provider === "goldApi.dev" && positive(q.regularMarketPrice) &&
+        (!positive(q.regularMarketTime) || q.regularMarketTime * 1000 > +now)) {
+      text.push(untimedMetal(q, label, price(q.regularMarketPrice)));
+      await showSpotBars();
       continue;
     }
     if (!q || !positive(q.regularMarketPrice) || !positive(q.regularMarketTime) || q.regularMarketTime*1000 > +now) {
-      text.push(label+" · "+(row.exchange ? "contratto attivo e prezzo non verificabili" : "quotazione non verificabile")+problem); next.push(row.name+" · ricontrollare disponibilità"); continue;
+      text.push(label+" · "+(row.exchange ? "contratto attivo e prezzo non verificabili" : "quotazione non verificabile")+problem);
+      next.push(row.name+" · ricontrollare disponibilità");
+      await showSpotBars();
+      continue;
     }
     if(q.observationDate){
       text.push(label+" · "+q.symbol+" · "+q.regularMarketPrice.toFixed(2)+"% · osservazione giornaliera FRED del "+q.observationDate+". Pubblicazione successiva alla rilevazione.");
@@ -140,6 +165,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
     const session = age <= 20*60_000 && q.marketState === "REGULAR" ? "aperta secondo il feed" :
       q.marketState === "CLOSED" ? "chiusa secondo il feed" : withinWindow ? "finestra di seduta; apertura non confermata" : "sessione non verificabile";
     text.push(`${label} · ${q.provider ?? "Yahoo"} ${q.symbol} · ${price(q.regularMarketPrice)} ${row.name.includes("10Y") ? "%" : q.currency ?? ""} · ${q.observationDate ?? stamp} · ${delay} · ${session}`);
+    if (q.provider === "goldApi.dev" && q.receivedAt) text.push("Risposta goldApi.dev ricevuta " + q.receivedAt + ".");
     if (q.continuous) text.push("Serie continua indicativa. Contratto attivo e scadenza non verificati.");
     if (q.bid && q.ask) text.push("Bid/ask "+fmt(q.bid)+"/"+fmt(q.ask));
     if (row.exchange && !q.continuous) {
@@ -148,6 +174,10 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       if (previous[row.name] && previous[row.name] !== q.symbol) text.push(`Rollover ${previous[row.name]} → ${q.symbol}. Serie separate.`);
     }
     if (positive(q.regularMarketPreviousClose)) text.push("Variazione giornaliera "+pct(q.regularMarketPreviousClose,q.regularMarketPrice).toFixed(2)+"%");
+    if (xau) {
+      await showSpotBars();
+      if (!q.provider?.startsWith("Twelve Data")) continue;
+    }
     const forex = q.provider?.startsWith("Twelve Data");
     if ((section !== "GOLD" && !forex) || age > maxAge) continue;
     if (positive(q.regularMarketDayLow) && positive(q.regularMarketDayHigh)) text.push(`Min/max seduta ${fmt(q.regularMarketDayLow)}–${fmt(q.regularMarketDayHigh)}`);
@@ -159,8 +189,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       text.push(q.continuous ? "Indicatori sospesi: rollover della serie continua non verificabile." : "OHLC spot non disponibili.");
       continue;
     }
-    const frames = [["15m","5d",15],["1h","1mo",60],["1d","3mo",1440]] as const;
-    const fixture = fake ? await state.read<Record<string,Bar[]>>("fake-gold-bars.json") : undefined;
+    const frames = xau ? goldFrames.slice(1) : goldFrames;
     const indicators = await Promise.all(frames.map(async ([interval,range,min]) => {
       const bars = fake ? fixture?.[q.symbol+"/"+interval] ?? [] : forex ? await feeds.forex(row.name,interval==="15m"?"15min":interval==="1d"?"1day":"1h",false).catch(()=>[]) : await feeds.yahooBars(q.symbol,range,interval).catch(()=>[]);
       return technical(bars,min,now);
@@ -180,7 +209,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
   text.push("", "NOTIZIE", ...await headlines(state,now),
     "", "PROSSIMO CONTROLLO", ...(next.length ? next : ["Verificare nuovi prezzi, sessioni e livelli dell’oro."]),
     "", "OPERAZIONI", "Nessun ordine inviato: briefing informativo.");
-  return { text:text.join("\n"), contracts:{...previous,...selected} };
+  return { text:text.join("\n"), contracts:{...previous,...selected}, selected };
 }
 
 export async function goldBriefing(state: State, now: Date, fake: boolean, redact: (s:string)=>string) {
@@ -189,4 +218,5 @@ export async function goldBriefing(state: State, now: Date, fake: boolean, redac
   const report=await buildGoldReport(state,now,fake);
   await enqueue(state,date,"gold",redact(report.text),date,"gold-report");
   await state.write("gold-contracts.json",report.contracts);
+  await state.write("gold-contracts-provenance.json",{ at: now.toISOString(), observed: report.selected });
 }

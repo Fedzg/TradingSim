@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MonitorFeeds, equities, normalize, quoteQuality } from "../src/monitor-feeds";
 import { cached, FeedFailure, publicResponse, freeUsage } from "../src/provider-cache";
-import { goldBriefing, technical } from "../src/gold-briefing";
+import { buildGoldReport, goldBriefing, technical } from "../src/gold-briefing";
+import { Market } from "../src/market";
 import { State } from "../src/state";
 import { universe } from "../src/broker";
 const dirs:string[]=[];
 const original=globalThis.fetch;
-const variables=["GOLDAPI_KEY","TWELVE_DATA_API_KEY","GOLDAPI_URL_TEMPLATE"];
+const variables=["GOLDAPI_KEY","TWELVE_DATA_API_KEY","GOLDAPI_URL_TEMPLATE","TRADINGSIM_SEC_USER_AGENT"];
 const saved=variables.map(k=>process.env[k]);
 afterEach(async()=>{
   setSystemTime();
@@ -257,12 +258,61 @@ test("goldApi.dev updatedAt data la risposta, non il prezzo spot",async()=>{
   delete process.env.GOLDAPI_URL_TEMPLATE;
   http(u=>{
     expect(u.pathname).toBe("/api/v1/price/XAU/USD");
-    return Response.json({metal:"XAU",currency:"USD",price:2400,updatedAt:"2026-11-23T13:00:00Z"});
+    return Response.json({metal:"XAU",currency:"USD",price:2400,updatedAt:"2026-11-23T12:45:00Z"});
   });
   const quote=await new MonitorFeeds(await state()).metal("XAU/USD");
-  expect(quote.responseAt).toBe("2026-11-23T13:00:00.000Z");
+  expect(quote.responseAt).toBe("2026-11-23T12:45:00.000Z");
+  expect(quote.receivedAt).toBe("2026-11-23T13:00:00.000Z");
   expect(quote.regularMarketTime).toBe(0);
   expect(quoteQuality(quote,new Date(),900000)).toContain("non verificabile");
+});
+
+test("Gold usa le barre Twelve Data anche quando la quotazione goldApi.dev è senza timestamp",async()=>{
+  const now = new Date("2026-11-23T13:00:00Z");
+  setSystemTime(now);
+  process.env.GOLDAPI_KEY = "test-only";
+  process.env.TWELVE_DATA_API_KEY = "test-only";
+  delete process.env.GOLDAPI_URL_TEMPLATE;
+  let barCount = 8;
+  http(url => {
+    if (url.hostname === "goldapi.dev") {
+      const symbol = url.pathname.split("/").at(-2);
+      return Response.json({symbol, currency:"USD", price:2400});
+    }
+    if (url.pathname === "/time_series" && url.searchParams.get("symbol") === "XAU/USD") {
+      const values = Array.from({length:barCount}, (_,i) => {
+        const datetime = new Date(+now - (barCount-i)*900000).toISOString().slice(0,19).replace("T"," ");
+        return {datetime,open:"2400",high:"2402",low:"2398",close:String(2400+i/100)};
+      });
+      return Response.json({meta:{symbol:"XAU/USD",interval:"15min"},values});
+    }
+    return new Response(null,{status:404});
+  });
+  const short = (await buildGoldReport(await state(), now, false)).text;
+  expect(short).toContain("risposta ricevuta 2026-11-23T13:00:00.000Z · ora della quotazione e freschezza non verificabili");
+  expect(short).toContain("OHLC spot XAU/USD · Twelve Data 15m · barre disponibili, indicatori non verificabili.");
+  barCount = 25;
+  const long = (await buildGoldReport(await state(), now, false)).text;
+  expect(long).toContain("OHLC spot XAU/USD · Twelve Data 15m · SMA5/20");
+  expect(long).not.toContain("OHLC spot XAU/USD · Twelve Data 15m · non disponibili");
+});
+
+test("EDGAR vuoto o indisponibile non invalida i dati di Alpaca News",async()=>{
+  const now = new Date("2026-11-23T13:00:00Z");
+  const article = {title:"Fixture",link:"https://example.test/news",source:"Alpaca",published:now.toISOString(),symbols:["SPY"],summary:"Fixture"};
+  const market = new Market(undefined, false);
+  spyOn(market as any,"alpacaNews").mockImplementation(async() => [article]);
+  let calls = 0;
+  http(() => { calls++; return new Response(null,{status:503}); });
+  process.env.TRADINGSIM_SEC_USER_AGENT = "   ";
+  const s = await state();
+  expect(await market.poll(s,now)).toMatchObject({edgar:"disabled",lastSuccess:now.toISOString(),articles:[article]});
+  expect(calls).toBe(0);
+  process.env.TRADINGSIM_SEC_USER_AGENT = "fixture";
+  const partial = await market.poll(s,now);
+  expect(calls).toBe(3);
+  expect(partial).toMatchObject({edgar:"partial",lastSuccess:now.toISOString(),articles:[article]});
+  expect(partial.error).toBeUndefined();
 });
 
 test("costo Twelve distinto dal totale progressivo del minuto",async()=>{
