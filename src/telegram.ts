@@ -22,7 +22,8 @@ function splitTelegramText(text: string) {
   const parts: string[] = [];
   while (text.length > limit) {
     let end = text.lastIndexOf("\n", limit - 1) + 1;
-    if (end === 0) {
+    if (end < limit / 2) {
+      end=0;
       const boundary=[...text.slice(0,limit).matchAll(/[.!?](?=\s)/gu)].at(-1);
       if(boundary) end=boundary.index!+1;
     }
