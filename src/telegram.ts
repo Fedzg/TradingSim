@@ -81,9 +81,10 @@ export class TelegramChannel implements Channel {
       throw new RetryDelivery("Limite di invio Telegram raggiunto.", seconds);
     }
     if (!response.ok || reply?.ok !== true) {
-      if (!reply || response.status >= 500) throw new DeliveryUnknown("Esito Telegram incerto: risposta non verificabile.");
-      if(code && code>=400 && code<500) throw new PermanentDeliveryFailure("Telegram HTTP "+code+".");
-      throw new Error(typeof code === "number" ? `Telegram HTTP ${code}.` : "Esito Telegram incerto: risposta non valida; possibile duplicato al ritentativo.");
+      if (reply?.ok === false && typeof code === "number" && code >= 400 && code < 500) {
+        throw new PermanentDeliveryFailure(`Telegram HTTP ${code}.`);
+      }
+      throw new DeliveryUnknown("Esito Telegram incerto: risposta non verificabile.");
     }
   }
 }

@@ -7,7 +7,7 @@ export function mobileReport(kind:string,original:string){
     const next=lines.indexOf("PROSSIMO CONTROLLO"), end=lines.indexOf("OPERAZIONI");
     if(next>=0 && end>next) lines.splice(next,end-next);
   }
-  return lines.map(line=>shortReport(line,320)
+  return lines.map(line=>(kind === "chiusura" ? line : shortReport(line,320))
     .replace(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/g,t=>italian.format(new Date(t))+" Roma")
     .replaceAll("sessione 24/7 · sessione 24/7","sessione 24/7")).join("\n");
 }

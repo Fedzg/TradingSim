@@ -1,6 +1,12 @@
 import {test,expect} from "bun:test";
 import {intradayTime} from "../src/bar-time";
 import {shortReport} from "../src/report-text";
+import { closeReportId, dailyClose } from "../src/daily-close";
+import { State } from "../src/state";
+import { wake } from "../src/time";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 test("IEX distingue apertura e chiusura al confine della barra",()=>{
   const at=new Date("2026-11-24T17:30:00Z");
   const session={date:"2026-11-24",open:"09:30",close:"16:00"};
@@ -27,4 +33,29 @@ test("Orari NY dopo il cambio ora e chiusura anticipata",()=>{
   const evaluated=new Date("2026-11-27T20:00Z");
   for(const [stamp,session] of [["14:00","premarket"],["14:30","regular"],["18:00","after-hours"]])
     expect(intradayTime(day.date+"T"+stamp+"Z","Alpaca IEX",evaluated,undefined,day).sessionType).toBe(session);
+});
+
+test("Il riepilogo USA conserva la motivazione completa anche nel testo mobile", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tradingsim-close-"));
+  const state = new State(root);
+  const date = "2026-11-24";
+  const now = new Date(date + "T21:05:30Z");
+  const sentence = "Le ultime barre a 15 minuti riportano il timestamp delle 20:15 UTC, circa 25 minuti prima della rilevazione.";
+  const reason = "La prima osservazione risale alla seduta regolare. ".repeat(8) + sentence;
+  try {
+    const entry = wake(date, "21:40");
+    await state.write(`history/${entry.id}.json`, { wake: entry, savedAt: now.toISOString(), summary: { reasons: [reason], alerts: [] } });
+    await dailyClose(state, {
+      async calendar() { return [{ date, open: "09:30", close: "16:00" }]; },
+      async clock() { return { timestamp: now.toISOString(), is_open: false, next_open: "2026-11-25T14:30:00Z", next_close: "2026-11-25T21:00:00Z" }; },
+      async snapshot() { throw Error("fixture"); },
+      async fills() { return []; },
+      async orderById() { throw Error("fixture"); },
+    }, now, text => text);
+    const report = await state.read<{ text: string; mobileText: string }>(`outbox/${closeReportId(date)}.json`);
+    expect(report?.text).toContain(sentence);
+    expect(report?.mobileText).toContain(sentence);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
