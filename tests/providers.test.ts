@@ -99,7 +99,7 @@ test("briefing con feed simulati: serie continue, indice, DGS10 e CFD distinti",
   const files=await s.list("outbox");expect(files).toHaveLength(1);
   const {text}=await s.read<any>("outbox/"+files[0]);
   for(const symbol of ["GC=F","MGC=F","CL=F","MCL=F","BZ=F","DX-Y.NYB","DGS10","USD/JPY"])expect(text).toContain(symbol);
-  expect(text).toContain("Serie continua indicativa"); expect(text).toContain("Gold CFD · CFD broker · quotazione non verificabile");
+  expect(text).toContain("Serie continua indicativa"); expect(text).not.toContain("Gold CFD");
   expect(hits.some(path=>path.includes("v7"))).toBe(false);
   expect(await s.list("intents")).toHaveLength(0);
 });

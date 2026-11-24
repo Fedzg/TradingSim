@@ -1,6 +1,8 @@
-import { RetryDelivery, type Channel, type Message } from "./chat";
+import {footer} from "./version";
+import { DeliveryUnknown, RetryDelivery, type Channel, type Message } from "./chat";
 
 const titles = {
+  strategia: "Strategia Paper",
   gold: "Gold & Futures",
   chiusura: "Riepilogo chiusura USA",
   resoconto: "Resoconto",
@@ -37,7 +39,7 @@ export class TelegramChannel implements Channel {
 
   async send(message: Message, checkpoint: (partsSent: number) => Promise<void>) {
     const header = message.kind ? `TradingSim · ${titles[message.kind]}` : "TradingSim";
-    const parts = splitTelegramText(message.text);
+    const parts = splitTelegramText((message.mobileText??message.text)+"\n\n"+footer(message.producer));
     for (let i = message.partsSent ?? 0; i < parts.length; i++) {
       const page = parts.length > 1 ? ` (${i + 1}/${parts.length})` : "";
       await this.sendText(`${header}${page}\n\n${parts[i]}`);
@@ -56,7 +58,7 @@ export class TelegramChannel implements Channel {
         signal: AbortSignal.timeout(10_000),
       });
     } catch {
-      throw new Error("Esito Telegram incerto: risposta persa. Nuovo tentativo dalla prima parte non confermata; possibile duplicato.");
+      throw new DeliveryUnknown("Esito Telegram incerto: risposta persa. Verificare la consegna.");
     }
     const reply = await response.json().catch(() => null) as TelegramReply | null;
     const code = response.ok ? reply?.error_code : response.status;
@@ -66,6 +68,7 @@ export class TelegramChannel implements Channel {
       throw new RetryDelivery("Limite di invio Telegram raggiunto.", seconds);
     }
     if (!response.ok || reply?.ok !== true) {
+      if (!reply || response.status >= 500) throw new DeliveryUnknown("Esito Telegram incerto: risposta non verificabile.");
       throw new Error(typeof code === "number" ? `Telegram HTTP ${code}.` : "Esito Telegram incerto: risposta non valida; possibile duplicato al ritentativo.");
     }
   }

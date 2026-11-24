@@ -46,7 +46,7 @@ export class MonitorFeeds {
     });
   }
   async forex(pair: string, interval: "15min"|"1h"|"1day", priority=this.priority) {
-    if (!pairs.includes(pair)) throw new Error("Coppia sconosciuta");
+    if (!pairs.includes(pair) && pair!=="XAU/USD") throw new Error("Coppia sconosciuta");
     const key = await secret("TWELVE_DATA_API_KEY");
     return cached(this.state,"twelve",pair+interval, interval === "1day" ? 6*3600000 : interval === "1h" ? 3600000 : 15*mins,async () => {
       const url = new URL("https://api.twelvedata.com/time_series");

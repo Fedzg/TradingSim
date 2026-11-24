@@ -1,3 +1,4 @@
+import {intradayTime} from "./bar-time";
 import {breakerOpen, confirms, manualPermission, recordHealth, strategyAlert} from "./strategy-controls";
 import {allowedStrategies,capacity,entryPlan,executionMode,setups,type Plan} from "./strategies";
 import {closedCandles} from "./indicators";
@@ -346,6 +347,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
     }
   }
 
+  const diagnostics:{symbol:string;strategy:string;timeframe:string;at:string;bar:unknown;reason:string;plan:Plan|null;theoreticalQty:number|null}[]=[];
   const plans=new Map<string,Plan>();
   if(mode!=="legacy" && snapshot && decision){
     decision={...decision,orders:[]};
@@ -358,7 +360,18 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
       else {
         briefingSession([day],snapshot.clock,now);
         for(const chart of charts){
-          const plan=entryPlan(chart,day,now,allowedStrategies());
+          if(!universe.some(s=>s===chart.symbol)) continue;
+          const evaluations=allowedStrategies().map(strategy=>{
+            let reason:string|undefined;
+            const plan=entryPlan(chart,day,now,[strategy],false,text=>{reason=text;});
+            const last=closedCandles(chart,"15Min",now).at(-1);
+            diagnostics.push({symbol:chart.symbol,strategy,timeframe:"15Min",at:now.toISOString(),bar:last?intradayTime(last.t,chart.source,now,last.receivedAt,day):null,
+              reason:reason??"segnale confermato",plan:plan??null,theoreticalQty:plan?capacity(plan,snapshot!,intents,now):null});
+            return {strategy,plan,reason};
+          });
+          for(const evaluation of evaluations)
+            note(chart.symbol+" · "+evaluation.strategy+" · "+(evaluation.reason??"segnale confermato"));
+          const plan=evaluations.find(e=>e.plan)?.plan;
           if(!plan) continue;
           const qty=capacity(plan,snapshot,intents,now);
           const reason=`${plan.strategy} · ${plan.source} · candela ${plan.bar} · ingresso ${plan.entry} · stop ${plan.stop} · target 2R ${plan.targets[1]} · quantità ${qty} · perdita teorica ${(qty*(plan.entry-plan.stop)).toFixed(2)} USD · RVOL ${plan.rvol.toFixed(2)}`;
@@ -478,7 +491,7 @@ async function runOnce({ state, broker, agents, market, redact }: Inputs, entry:
   }
   const event = `${entry.id}-${crypto.randomUUID()}.json`;
   await state.write(`history/${event}`, baton);
-  await state.write(`logs/${event}`, { run: entry.id, report: baton.report, alerts: alerts.map(redact), technical: details.map(row => redact(row.full)) });
+  await state.write(`logs/${event}`, { run: entry.id, report: baton.report, diagnostics, alerts: alerts.map(redact), technical: details.map(row => redact(row.full)) });
   await enqueue(state, entry.id, "resoconto", redact(report), entry.id, "wake-report");
   const scenarios = chartAnalysis && chartScenarios(chartAnalysis, charts, now);
   if (scenarios) await enqueue(state, entry.id, "scenario-grafici", redact(scenarios), entry.id);

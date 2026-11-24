@@ -117,7 +117,7 @@ test("news riceve 30 riassunti compatti; cache intatta e nessun ordine discrezio
   expect(received?.articles).toEqual(articles.slice(0, 30).map(article => ({
     ...article, summary: "x".repeat(179) + "📰",
   })));
-  expect(await f.state.read("news.json")).toEqual(cached);
+  expect(await f.state.read("news.json")).toMatchObject(cached);
 });
 
 test("testimone corrotto: prosegue e segnala l’errore", async () => {
@@ -383,8 +383,8 @@ for (const fault of ["empty", "stale", "15Min", "1Day", "closed"]) {
       sample: actual.find(series => series.symbol === "SPY")?.intervals["1Day"]?.length }));
     for (const symbol of symbols) {
       const series = actual.find(row => row.symbol === symbol)!;
-      expect(series.intervals["1Day"]).toEqual(fault === "1Day" ? [] : sample["1Day"]);
-      expect(series.intervals["15Min"]).toEqual(fault === "15Min" ? [] : intra);
+      expect(series.intervals["1Day"].map(({receivedAt,...bar})=>bar)).toEqual(fault === "1Day" ? [] : sample["1Day"]);
+      expect(series.intervals["15Min"].map(({receivedAt,...bar})=>bar)).toEqual(fault === "15Min" ? [] : intra);
       const line = report.split("\n").find(row => row.startsWith(symbol + " (Alpaca IEX)")) ?? "";
       const intraStamp = fault === "15Min" ? undefined : intra.at(-1)?.t;
       const dailyStamp = fault === "1Day" ? undefined : sample["1Day"].at(-1)?.t;

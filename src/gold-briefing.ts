@@ -99,6 +99,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
   const previous = await state.read<Record<string,string>>("gold-contracts.json") ?? {};
   let section = "";
   for (const row of rows) {
+    if (row.name === "Gold CFD" && !row.symbols.length) continue;
     if (section !== row.section) { section = row.section; text.push("",section); }
     const candidates = quotes.filter(q=>row.symbols.includes(q.symbol));
     let q = row.exchange ? activeContract(candidates,now) : candidates[0];
@@ -116,13 +117,19 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
         else q=await feeds.yahooQuote(row.symbols[0]);
       } catch (e) { problem = e instanceof Error && /^(Feed |Chiave |Endpoint )/.test(e.message) ? " · "+e.message : " · fonte indisponibile"; }
     }
+    const decimals=row.name==="USD/JPY"?3:["GBP/USD","EUR/USD"].includes(row.name)?5:2;
+    const price=(v:number)=>v.toLocaleString("it-IT",{minimumFractionDigits:decimals,maximumFractionDigits:decimals});
     const label = row.name+" · "+row.venue;
     if (q?.responseAt && !q.regularMarketTime) {
-      text.push(label+" · "+q.provider+" · "+fmt(q.regularMarketPrice)+" USD · risposta "+q.responseAt+" · freschezza del prezzo non verificabile.");
+      text.push(label+" · "+q.provider+" · "+price(q.regularMarketPrice)+" USD · risposta "+q.responseAt+" · freschezza del prezzo non verificabile.");
       continue;
     }
     if (!q || !positive(q.regularMarketPrice) || !positive(q.regularMarketTime) || q.regularMarketTime*1000 > +now) {
       text.push(label+" · "+(row.exchange ? "contratto attivo e prezzo non verificabili" : "quotazione non verificabile")+problem); next.push(row.name+" · ricontrollare disponibilità"); continue;
+    }
+    if(q.observationDate){
+      text.push(label+" · "+q.symbol+" · "+q.regularMarketPrice.toFixed(2)+"% · osservazione giornaliera FRED del "+q.observationDate+". Pubblicazione successiva alla rilevazione.");
+      continue;
     }
     const age = +now-q.regularMarketTime*1000;
     const stamp = new Date(q.regularMarketTime*1000).toISOString();
@@ -132,7 +139,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       q.regularMarketTime>=q.sessionStart;
     const session = age <= 20*60_000 && q.marketState === "REGULAR" ? "aperta secondo il feed" :
       q.marketState === "CLOSED" ? "chiusa secondo il feed" : withinWindow ? "finestra di seduta; apertura non confermata" : "sessione non verificabile";
-    text.push(`${label} · ${q.provider ?? "Yahoo"} ${q.symbol} · ${fmt(q.regularMarketPrice)} ${row.name.includes("10Y") ? "%" : q.currency ?? ""} · ${q.observationDate ?? stamp} · ${delay} · ${session}`);
+    text.push(`${label} · ${q.provider ?? "Yahoo"} ${q.symbol} · ${price(q.regularMarketPrice)} ${row.name.includes("10Y") ? "%" : q.currency ?? ""} · ${q.observationDate ?? stamp} · ${delay} · ${session}`);
     if (q.continuous) text.push("Serie continua indicativa. Contratto attivo e scadenza non verificati.");
     if (q.bid && q.ask) text.push("Bid/ask "+fmt(q.bid)+"/"+fmt(q.ask));
     if (row.exchange && !q.continuous) {
@@ -140,7 +147,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       text.push("Scadenza "+new Date(q.expireDate!*1000).toISOString().slice(0,10));
       if (previous[row.name] && previous[row.name] !== q.symbol) text.push(`Rollover ${previous[row.name]} → ${q.symbol}. Serie separate.`);
     }
-    if (positive(q.regularMarketPreviousClose)) text.push("Variazione giornaliera "+fmt(pct(q.regularMarketPreviousClose,q.regularMarketPrice))+"%");
+    if (positive(q.regularMarketPreviousClose)) text.push("Variazione giornaliera "+pct(q.regularMarketPreviousClose,q.regularMarketPrice).toFixed(2)+"%");
     const forex = q.provider?.startsWith("Twelve Data");
     if ((section !== "GOLD" && !forex) || age > maxAge) continue;
     if (positive(q.regularMarketDayLow) && positive(q.regularMarketDayHigh)) text.push(`Min/max seduta ${fmt(q.regularMarketDayLow)}–${fmt(q.regularMarketDayHigh)}`);
@@ -148,7 +155,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       text.push("Volume seduta "+fmt(q.regularMarketVolume));
       if (positive(q.regularMarketVwap)) text.push("VWAP seduta "+fmt(q.regularMarketVwap));
     }
-    if (q.continuous || (q.provider==="Twelve Data · quote 1min" || q.provider==="goldApi.dev" || q.provider?.includes("fallback spot"))) {
+    if (q.continuous || (q.provider==="goldApi.dev" || q.provider?.includes("fallback spot"))) {
       text.push(q.continuous ? "Indicatori sospesi: rollover della serie continua non verificabile." : "OHLC spot non disponibili.");
       continue;
     }
@@ -162,7 +169,7 @@ export async function buildGoldReport(state: State, now: Date, fake: boolean) {
       const frame = frames[i][0];
       if (!result) { text.push(frame+" · indicatori non verificabili"); continue; }
       const {fast,slow,atr,rsi,high,low,signal} = result;
-      text.push(`${frame} · ${fast > slow ? "rialzista" : fast < slow ? "ribassista" : "laterale"} · SMA5/20 ${fmt(fast)}/${fmt(slow)} · RSI14 ${fmt(rsi)} · ATR14 ${fmt(atr)} · ${signal}`);
+      text.push(`${frame} · ${fast > slow ? "rialzista" : fast < slow ? "ribassista" : "laterale"} · SMA5/20 ${fmt(fast)}/${fmt(slow)} · RSI14 ${rsi.toFixed(1)} · ATR14 ${fmt(atr)} · ${signal}`);
       if (!indicators.slice(0,i).some(Boolean)) {
         text.push(`Scenari ${frame}: rialzista sopra ${fmt(high)}, ribassista sotto ${fmt(low)}, neutrale fra i due livelli. Rientro nel range invalida il breakout.`);
         next.push(`${q.symbol}: verificare la chiusura ${frame} rispetto a ${fmt(low)} e ${fmt(high)}.`);

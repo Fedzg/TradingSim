@@ -122,9 +122,20 @@ export class Discovery {
         delete proposals[id];
       }
     };
-    for (let index = 0; index < work.length; index += 3) {
-      await Promise.all(work.slice(index, index + 3).map(analyze));
+    // discovery.guard serializes reservations across worker processes.
+    const budgetPath="budgets/discovery.json";
+    const budget=await this.state.read<{calls:number[];failures:number;resume:number}>(budgetPath) ?? {calls:[],failures:0,resume:0};
+    budget.calls=budget.calls.filter(t=>t>+now-3600000);
+    const admitted=work.slice(0,+now<budget.resume ? 0 : Math.min(3,Math.max(0,Math.floor((24-budget.calls.length)/2))));
+    if(admitted.length){
+      budget.calls.push(...Array(admitted.length*2).fill(+now));
+      await this.state.write(budgetPath,budget);
+      await Promise.all(admitted.map(analyze));
+      budget.failures=counts.errors ? budget.failures+1 : 0;
+      budget.resume=counts.errors ? +now+Math.min(3600000,60000*2**Math.min(6,budget.failures-1)) : 0;
+      await this.state.write(budgetPath,budget);
     }
+    metric("budget.discovery",{reserved:admitted.length*2,deferred:work.length-admitted.length});
     data.scanAt = now.toISOString();
     await this.state.write(path, data);
     metric("analysis.discovery-cache", { ...counts, causes, elapsedMs: elapsed(started) });
