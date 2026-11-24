@@ -1,5 +1,5 @@
 import {footer} from "./version";
-import { DeliveryUnknown, RetryDelivery, type Channel, type Message } from "./chat";
+import { PermanentDeliveryFailure, DeliveryUnknown, RetryDelivery, type Channel, type Message } from "./chat";
 
 const titles = {
   strategia: "Strategia Paper",
@@ -69,6 +69,7 @@ export class TelegramChannel implements Channel {
     }
     if (!response.ok || reply?.ok !== true) {
       if (!reply || response.status >= 500) throw new DeliveryUnknown("Esito Telegram incerto: risposta non verificabile.");
+      if(code && code>=400 && code<500) throw new PermanentDeliveryFailure("Telegram HTTP "+code+".");
       throw new Error(typeof code === "number" ? `Telegram HTTP ${code}.` : "Esito Telegram incerto: risposta non valida; possibile duplicato al ritentativo.");
     }
   }

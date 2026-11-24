@@ -11,7 +11,7 @@ export type Message = {
   summarized?:boolean;
   kind?: Kind;
   delivered?: string;
-  deliveryStatus?: "QUEUED"|"SENDING"|"PARTIALLY_SENT"|"DELIVERED"|"LOCAL_ONLY"|"DELIVERY_UNKNOWN"|"FAILED_RETRYABLE";
+  deliveryStatus?: "QUEUED"|"SENDING"|"PARTIALLY_SENT"|"DELIVERED"|"LOCAL_ONLY"|"DELIVERY_UNKNOWN"|"FAILED_RETRYABLE"|"FAILED_PERMANENT"|"SUPPRESSED"|"EXPIRED";
   deliveryReason?: string;
   queuedAt?: string;
   attempts?: number;
@@ -22,6 +22,7 @@ export type Message = {
 };
 export interface Channel { send(message: Message, checkpoint: (partsSent: number) => Promise<void>): Promise<void> }
 
+export class PermanentDeliveryFailure extends Error {}
 export class DeliveryUnknown extends Error {}
 
 export class RetryDelivery extends Error {
@@ -63,7 +64,7 @@ export async function flush(state: State, channel: Channel, now?: Date, select?:
   for (const record of records) {
     const { path } = record;
     let { message } = record;
-    if (!message || message.delivered || message.deliveryStatus==="DELIVERY_UNKNOWN") continue;
+    if (!message || message.delivered || ["DELIVERY_UNKNOWN","FAILED_PERMANENT","EXPIRED","SUPPRESSED"].includes(message.deliveryStatus??"")) continue;
     if(message.deliveryStatus==="SENDING" || message.deliveryStatus==="PARTIALLY_SENT"){
       await state.write(path,{...message,deliveryStatus:"DELIVERY_UNKNOWN",deliveryReason:"Processo interrotto durante la consegna"});
       continue;
@@ -92,7 +93,7 @@ export async function flush(state: State, channel: Channel, now?: Date, select?:
       console.log(`Messaggio ${message.id}: consegnato.`);
     } catch (error) {
       message.error = error instanceof Error ? error.message : "Errore di consegna.";
-      message.deliveryStatus=error instanceof DeliveryUnknown ? "DELIVERY_UNKNOWN" : "FAILED_RETRYABLE";
+      message.deliveryStatus=error instanceof DeliveryUnknown ? "DELIVERY_UNKNOWN" : error instanceof PermanentDeliveryFailure ? "FAILED_PERMANENT" : "FAILED_RETRYABLE";
       message.deliveryReason=message.error;
       if (message.attempts === 1) console.log(`Messaggio ${message.id}: in coda. ${message.error}`);
       if (error instanceof RetryDelivery) message.retryAt = new Date(+currentTime() + error.seconds * 1000).toISOString();

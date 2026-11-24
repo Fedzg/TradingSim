@@ -1,6 +1,7 @@
 """Build exactly the Git tree named by the operator, independent of working files."""
 import datetime
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -19,6 +20,8 @@ with tempfile.TemporaryDirectory() as temp:
     identity = json.loads(path.read_text())
     identity.update(commit=commit, builtAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
     path.write_text(json.dumps(identity))
-    subprocess.run(["docker", "build", "--label", "org.opencontainers.image.revision=" + commit,
+    ca = os.environ.get("TRADINGSIM_BUILD_CA")
+    trust = ["--secret", "id=build-ca,src=" + ca] if ca else []
+    subprocess.run(["docker", "build", *trust, "--label", "org.opencontainers.image.revision=" + commit,
                     "-f", str(root / "deploy/Dockerfile"), "-t", "tradingsim:" + commit[:12], str(root)], check=True)
     subprocess.run(["docker","image","inspect","--format","{{.Id}} {{index .Config.Labels \"org.opencontainers.image.revision\"}}","tradingsim:" + commit[:12]],check=True)

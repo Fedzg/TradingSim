@@ -216,3 +216,12 @@ test("processi Bun: le quattro sveglie partono anche durante la scansione; feed 
   expect(await output).toContain("Scheduler attivo");
   expect(await errors).toBe("");
 }, 18_000);
+
+test("Il budget discovery sopravvive alla ricreazione del workflow",async()=>{
+  const f=await fixture({});
+  await f.state().write("budgets/discovery.json",{calls:Array(24).fill(+at(0)),failures:0,resume:0});
+  await f.scan(at(15));
+  expect(f.calls).toHaveLength(0);
+  await f.scan(at(61));
+  expect(f.calls).toHaveLength(2);
+});

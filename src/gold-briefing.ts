@@ -69,7 +69,7 @@ async function headlines(state: State, now: Date) {
   const news = await state.read<News>("news.json");
   if (!news || news.error || !news.lastSuccess || !(+now-Date.parse(news.lastSuccess) <= 30*60_000)) return ["Cache notizie non verificabile."];
   const articles = news.articles.filter(a => macro.test(a.title+" "+a.summary) && /^https:\/\//.test(a.link) &&
-    Date.parse(a.published) <= +now && +now-Date.parse(a.published) <= 48*3600_000);
+    URL.canParse(a.link) && new URL(a.link).pathname!=="/" && Date.parse(a.published) <= +now && +now-Date.parse(a.published) <= 48*3600_000);
   const cache = await state.read<{ analysis: NewsAnalysis }>("wake-news-analysis.json");
   const events = verifyEvents(cache?.analysis.events ?? [], articles, [], now);
   const seen = new Set<string>();
