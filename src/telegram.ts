@@ -1,6 +1,8 @@
-import { RetryDelivery, type Channel, type Message } from "./chat";
+import {footer} from "./version";
+import { PermanentDeliveryFailure, DeliveryUnknown, RetryDelivery, type Channel, type Message } from "./chat";
 
 const titles = {
+  strategia: "Strategia Paper",
   gold: "Gold & Futures",
   chiusura: "Riepilogo chiusura USA",
   resoconto: "Resoconto",
@@ -13,12 +15,19 @@ const titles = {
   watchlist: "Watchlist",
 };
 
+const escapeHtml=(value:string)=>value.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+
 function splitTelegramText(text: string) {
   const limit = 3900;
   const parts: string[] = [];
   while (text.length > limit) {
     let end = text.lastIndexOf("\n", limit - 1) + 1;
     if (end < limit / 2) {
+      end=0;
+      const boundary=[...text.slice(0,limit).matchAll(/[.!?](?=\s)/gu)].at(-1);
+      if(boundary) end=boundary.index!+1;
+    }
+    if (end === 0) {
       end = limit;
       const lastCodeUnit = text.charCodeAt(end - 1);
       if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) end--;
@@ -37,26 +46,32 @@ export class TelegramChannel implements Channel {
 
   async send(message: Message, checkpoint: (partsSent: number) => Promise<void>) {
     const header = message.kind ? `TradingSim · ${titles[message.kind]}` : "TradingSim";
-    const parts = splitTelegramText(message.text);
+    const parts = splitTelegramText((message.mobileText??message.text)+"\n\n"+footer(message.producer));
     for (let i = message.partsSent ?? 0; i < parts.length; i++) {
       const page = parts.length > 1 ? ` (${i + 1}/${parts.length})` : "";
-      await this.sendText(`${header}${page}\n\n${parts[i]}`);
+      const html=!!message.mobileText;
+      const body=html ? parts[i].split("\n").map(line=>{
+        const value=line.trim();
+        if(value.startsWith("https://") && URL.canParse(value) && !/\s/.test(value)) return '<a href="'+escapeHtml(value)+'">Fonte · '+escapeHtml(new URL(value).hostname)+'</a>';
+        return escapeHtml(line);
+      }).join("\n") : parts[i];
+      await this.sendText((html?"<b>"+escapeHtml(header+page)+"</b>":header+page)+"\n\n"+body,html);
       await checkpoint(i + 1);
     }
   }
 
-  private async sendText(text: string) {
+  private async sendText(text: string, html:boolean) {
     let response: Response;
     try {
       response = await this.request(`https://api.telegram.org/bot${this.token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: this.chatId, text, link_preview_options: { is_disabled: true } }),
+        body: JSON.stringify({ chat_id: this.chatId, text, ...(html?{parse_mode:"HTML"}:{}), link_preview_options: { is_disabled: true } }),
         redirect: "error",
         signal: AbortSignal.timeout(10_000),
       });
     } catch {
-      throw new Error("Esito Telegram incerto: risposta persa. Nuovo tentativo dalla prima parte non confermata; possibile duplicato.");
+      throw new DeliveryUnknown("Esito Telegram incerto: risposta persa. Verificare la consegna.");
     }
     const reply = await response.json().catch(() => null) as TelegramReply | null;
     const code = response.ok ? reply?.error_code : response.status;
@@ -66,7 +81,10 @@ export class TelegramChannel implements Channel {
       throw new RetryDelivery("Limite di invio Telegram raggiunto.", seconds);
     }
     if (!response.ok || reply?.ok !== true) {
-      throw new Error(typeof code === "number" ? `Telegram HTTP ${code}.` : "Esito Telegram incerto: risposta non valida; possibile duplicato al ritentativo.");
+      if (reply?.ok === false && typeof code === "number" && code >= 400 && code < 500) {
+        throw new PermanentDeliveryFailure(`Telegram HTTP ${code}.`);
+      }
+      throw new DeliveryUnknown("Esito Telegram incerto: risposta non verificabile.");
     }
   }
 }

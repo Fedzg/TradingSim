@@ -2,6 +2,7 @@ import {cached,publicResponse} from "./provider-cache";
 import type {Article} from "./market";
 import type {State} from "./state";
 export const issuers={AAPL:"0000320193",MSFT:"0000789019",NVDA:"0001045810"} as const;
+export const edgarUserAgent = () => process.env.TRADINGSIM_SEC_USER_AGENT?.trim() || undefined;
 type Issuer=keyof typeof issuers;
 export function filings(symbol:Issuer,data:any,now:Date):Article[]{
   if(Number(data.cik)!==Number(issuers[symbol])) throw Error("CIK SEC non corrispondente");
@@ -39,8 +40,9 @@ export function fundamentals(symbol:Issuer,data:any,at:Date){
     netMargin:rev[0]?.val>0 && rev[0].frame===income[0]?.frame?income[0].val/rev[0].val:null};
 }
 export async function secData(state:State,symbol:Issuer,facts:boolean){
-  const agent=process.env.TRADINGSIM_SEC_USER_AGENT?.trim();
-  if(!agent || !issuers[symbol]) throw Error("SEC: emittente o contatto User-Agent mancante");
+  const agent=edgarUserAgent();
+  if(!agent) throw Error("SEC EDGAR disattivato: impostare TRADINGSIM_SEC_USER_AGENT con un contatto reale.");
+  if(!Object.hasOwn(issuers,symbol)) throw Error("SEC EDGAR: emittente non supportato.");
   const url="https://data.sec.gov/"+(facts?"api/xbrl/companyfacts/":"submissions/")+"CIK"+issuers[symbol]+".json";
   return cached(state,"sec",url,facts?86400000:900000,async()=>await (await publicResponse(new URL(url),{"User-Agent":agent})).json(),8,500);
 }

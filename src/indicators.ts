@@ -1,3 +1,4 @@
+import {intradayTime} from "./bar-time";
 import type { Series } from "./market";
 
 type Bar = Series["intervals"][string][number];
@@ -48,6 +49,7 @@ function intervalEvidence(series: Series, interval: Interval, now: Date) {
   const volume = relativeVolume(bars);
   const lagMinutes = last ? Math.round((+now - Date.parse(last.t) - duration[interval]) / 60_000) : null;
   return {
+    ...(last && interval==="15Min" && series.source==="Alpaca IEX" ? {timing:intradayTime(last.t,series.source,now,last.receivedAt)}:{}),
     lastClosed: last?.t ?? null, lagMinutes, feedError: series.intervalErrors?.[interval],
     stale: lagMinutes === null || lagMinutes > (interval === "15Min" ? 75 : 4 * 24 * 60),
     count: bars.length, changePct: bars.length > 1 ? rounded(pct(bars.at(-2)!.c, last!.c)) : null,

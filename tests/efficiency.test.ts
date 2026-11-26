@@ -13,6 +13,7 @@ import { orderReviewContext } from "../src/order-review-context";
 import { ticketFor } from "../src/risk";
 import { State, type Baton } from "../src/state";
 import { wake } from "../src/time";
+import { producer } from "../src/version";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -54,9 +55,11 @@ test("quattro scansioni distinte e riavvio: due chiamate anche se avanza la cand
   expect(f.calls).toEqual(["discoveryNews", "discoveryCharts"]);
   expect(await f.discovery().proposals()).toHaveLength(1);
   expect(await f.state().list("outbox")).toEqual([]);
-  const { analysisCache } = (await f.state().read<any>("watchlist.json"))!;
+  const { analysisCache, scanProvenance } = (await f.state().read<any>("watchlist.json"))!;
   const record = Object.values(analysisCache)[0] as any;
   expect(record.analyzedAt).toBe(at(0).toISOString());
+  expect(record.producer).toEqual(producer);
+  expect(scanProvenance).toEqual({ at: at(45).toISOString(), producer });
   expect(record.sources.mercato.url).toBe(candidate(at(0)).market.url);
   expect(record.candidate.metrics.dayPct).toBe(2.4);
 });
@@ -216,3 +219,12 @@ test("processi Bun: le quattro sveglie partono anche durante la scansione; feed 
   expect(await output).toContain("Scheduler attivo");
   expect(await errors).toBe("");
 }, 18_000);
+
+test("Il budget discovery sopravvive alla ricreazione del workflow",async()=>{
+  const f=await fixture({});
+  await f.state().write("budgets/discovery.json",{calls:Array(24).fill(+at(0)),failures:0,resume:0});
+  await f.scan(at(15));
+  expect(f.calls).toHaveLength(0);
+  await f.scan(at(61));
+  expect(f.calls).toHaveLength(2);
+});

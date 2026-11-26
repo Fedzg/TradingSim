@@ -1,3 +1,4 @@
+import { shortReport as short } from "./report-text";
 import type { Charts } from "./agents";
 import type { BrokerOrder, Intent } from "./broker";
 import { terminal } from "./risk";
@@ -29,12 +30,6 @@ type Report = {
   technical: string[];
   session: string[];
   account: string[];
-};
-
-const short = (value: string, limit: number) => {
-  const text = value.replace(/\s+/g, " ").trim();
-  if (text.length <= limit) return text;
-  return Array.from(text).slice(0, limit - 1).join("") + "…";
 };
 
 const side = (value: BrokerOrder["side"]) => value === "buy" ? "Acquisto" : "Vendita";

@@ -47,6 +47,7 @@ export async function notificationSelector(state: State, redact: (text: string) 
     .map(id => outboxId("watchlist", `${id}/outcome`)));
   const intents = new Map((await state.intents()).map(intent => [intent.id, intent]));
   return async (message: Message) => {
+    if(!message.producer || ["DELIVERY_UNKNOWN","FAILED_PERMANENT","SUPPRESSED","EXPIRED"].includes(message.deliveryStatus??"")) return;
     if (message.kind === "watchlist" && message.notification === "watchlist-addition" && additionIds.has(message.id) &&
         message.text.includes("Aggiunto alla watchlist. Solo monitoraggio.")) return message;
     if (message.kind === "strategia" && message.notification === "strategy-alert") return message;

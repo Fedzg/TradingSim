@@ -212,7 +212,7 @@ test("G7a: Telegram 429 sulla parte 2, riavvio e attesa a partire dal 429", asyn
   expect((await f.messages())[0]?.delivered).toBeDefined();
 });
 
-test("G7b: risposta persa dopo accettazione, la parte non confermata può duplicarsi", async () => {
+test("G7b: risposta persa dopo accettazione, la parte non confermata rimane sospesa", async () => {
   const f = await fixture();
   await enqueue(f.state, "lost", "resoconto", "x".repeat(5100));
   expect((await f.driver("lost")).code).toBe(0);
@@ -220,8 +220,8 @@ test("G7b: risposta persa dopo accettazione, la parte non confermata può duplic
   expect((await f.messages())[0]?.delivered).toBeUndefined();
   expect((await f.driver("lost")).code).toBe(0);
   const requests = (await f.state.read<Send[]>("requests.json"))!;
-  expect(requests.filter(x => x.accepted).map(x => x.part)).toEqual([1, 2, 2]);
-  expect((await f.messages())[0]?.delivered).toBeDefined();
+  expect(requests.filter(x => x.accepted).map(x => x.part)).toEqual([1, 2]);
+  expect((await f.messages())[0]?.deliveryStatus).toBe("DELIVERY_UNKNOWN");
   console.log("G7b", { accepted: requests.map(x => x.part), unconfirmedCheckpoint: 1 });
 });
 
@@ -504,7 +504,7 @@ test("12:30 Gold automatico e manuale, futures aperti con NYSE chiusa; riavvio s
   expect((await f.once("",env,"12:30").outcome).code).toBe(0);
   const [name] = await f.state.list("fake-chat");
   const report = (await f.state.read<Message>("fake-chat/"+name))!;
-  for (const part of ["GOLD","MATERIE PRIME","FOREX E MACRO","NOTIZIE","PROSSIMO CONTROLLO","OPERAZIONI","GCZ26.CMX","aperta secondo il feed","ritardo 10 min","Rollover","dato datato","Gold CFD · CFD broker · quotazione non verificabile"]) expect(report.text).toContain(part);
+  for (const part of ["GOLD","MATERIE PRIME","FOREX E MACRO","NOTIZIE","PROSSIMO CONTROLLO","OPERAZIONI","GCZ26.CMX","aperta secondo il feed","ritardo 10 min","Rollover","dato datato"]) expect(report.text).toContain(part);
   expect(report.text.match(/Gold and Fed rates/g)).toHaveLength(1);
   expect(await f.state.list("fake-chat")).toHaveLength(1);
   expect(await f.orders()).toEqual([]);

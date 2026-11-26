@@ -58,7 +58,8 @@ export async function dailyClose(state: State, broker: Pick<Alpaca, "calendar" |
   const decisions = [...history.values()].sort((a, b) => a.wake.id.localeCompare(b.wake.id)).flatMap(row => {
     const fallback = row.report?.split("\n").filter(line => /^(Proposto dal decisore|Motivazione|Respinto|Nessun ordine discrezionale|⚠)/.test(line)) ?? [];
     const items = row.summary ? [...row.summary.reasons, ...row.summary.alerts, ...fallback.filter(line => line.startsWith("Proposto"))] : fallback;
-    return [...new Set(items)].slice(0, 4).map(item => `• ${row.wake.slot} Roma · ${item.slice(0, 230)}`);
+    return [...new Set([...(row.summary?.alerts ?? []), ...items.slice(0,4)])].map(item =>
+      `• ${row.wake.slot} Roma · ${item.replace(/\s+/gu, " ").trim()}`);
   });
   const quantities = new Intl.NumberFormat("it-IT", { maximumFractionDigits: 9 });
   const tradeLines = [...new Set([...orders.keys(), ...byOrder.keys()])].map(id => {

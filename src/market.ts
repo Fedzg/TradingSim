@@ -1,13 +1,14 @@
 import { publicResponse } from "./provider-cache";
+import { edgarUserAgent, issuers, filings, secData } from "./edgar";
 import { universe, watched } from "./broker";
 import { McpError, payload, type Mcp } from "./mcp";
 import type { State } from "./state";
 
-type Candle = { t: string; o: number; h: number; l: number; c: number; v: number | null };
+type Candle = { receivedAt?:string; t: string; o: number; h: number; l: number; c: number; v: number | null };
 export type Observation = { provider:string; providerSymbol:string; instrumentType:string; venue:string; currency:string; price:number|null; barStart:string|null; session:string; quality:string; delayMinutes:number|null };
 export type Series = { observation?:Observation; symbol: string; source: string; updated: string | null; error?: string; intervalErrors?: Partial<Record<"15Min" | "1Day", string>>; intervals: Record<string, Candle[]> };
 export type Article = { title: string; link: string; source: string; published: string; symbols: string[]; summary: string };
-export type News = { lastSuccess: string | null; checked: string; error?: string; articles: Article[] };
+export type News = { lastSuccess: string | null; checked: string; error?: string; edgar?: "disabled" | "ok" | "partial"; articles: Article[] };
 
 async function json<T>(url: string): Promise<T> {
   const response = await publicResponse(new URL(url));
@@ -48,7 +49,7 @@ export class Market {
       type Bar = Omit<Candle, "v"> & { v: number };
       return payload<{ bars: Record<string, Bar[]> }>(this.mcp!, "get_stock_bars", {
         symbols: universe.join(","), timeframe: interval, feed: "iex", start: since, limit: 10000,
-      });
+      }).then(data=>({...data,receivedAt:new Date().toISOString()}));
     }));
     const extras = Promise.all([["USOIL", "CL=F"], ["GBP/USD", "GBPUSD=X"]].map(async ([symbol, ticker]) => {
       if (this.monitor) return this.monitor({symbol,ticker,series:symbol==="USOIL"?"riferimento WTI continuo":undefined});
@@ -68,7 +69,7 @@ export class Market {
           const data = result.value.bars;
           if (data && typeof data === "object" && !Array.isArray(data)) {
             if (!(symbol in data)) return [];
-            if (Array.isArray(data[symbol])) return data[symbol].slice(-48);
+            if (Array.isArray(data[symbol])) return data[symbol].slice(-48).map(b=>({...b,receivedAt:result.value.receivedAt}));
           }
         }
         intervalErrors[interval] = "errore del feed IEX";
@@ -88,16 +89,19 @@ export class Market {
         title: "Dati macro di prova per WTI e GBP/USD", link: "https://example.com/mercati",
         source: "Fonte finta", published: checked, symbols: ["USOIL", "GBP/USD"], summary: "Esempio deterministico.",
       }] : await this.alpacaNews(now);
-      let secIssue:string|undefined;
-      if(!this.fake && process.env.TRADINGSIM_SEC_USER_AGENT){
-        const {issuers,filings,secData}=await import("./edgar");
-        for(const symbol of Object.keys(issuers) as (keyof typeof issuers)[]){
-          try {articles.push(...filings(symbol,await secData(state,symbol,false),now));}
-          catch {secIssue="Fonte SEC EDGAR parziale";}
+      let edgar: News["edgar"] = "disabled";
+      if(!this.fake && edgarUserAgent()){
+        edgar = "ok";
+        const symbols = Object.keys(issuers) as (keyof typeof issuers)[];
+        const filingsBySymbol = await Promise.allSettled(symbols.map(async symbol =>
+          filings(symbol, await secData(state, symbol, false), now)));
+        for (const result of filingsBySymbol) {
+          if (result.status === "fulfilled") articles.push(...result.value);
+          else edgar = "partial";
         }
       }
       const merged = new Map([...previous.articles, ...articles].map(x => [x.link, x]));
-      next = { checked, lastSuccess: checked, error:secIssue, articles: [...merged.values()]
+      next = { checked, lastSuccess: checked, edgar, articles: [...merged.values()]
         .filter(article => Date.parse(article.published) >= +now - 48 * 3600_000)
         .sort((a, b) => b.published.localeCompare(a.published)).slice(0, 200) };
     } catch (error) {

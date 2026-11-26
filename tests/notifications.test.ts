@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeBroker, type BrokerOrder, type Intent } from "../src/broker";
-import { enqueue } from "../src/chat";
+import { enqueue, outboxId } from "../src/chat";
 import { flushNotifications, pollOrders, queueOrder } from "../src/notifications";
 import { State } from "../src/state";
 import { TelegramChannel } from "../src/telegram";
@@ -103,4 +103,20 @@ test("la consegna filtra le code vecchie e nuove senza cancellare resoconti o bl
   expect(f.sent[0]).toContain(intent.order.reason);
   expect(await f.state.list("outbox")).toHaveLength(9);
   expect(await f.state.read("outbox/000.json")).toMatchObject({ text: "Briefing preesistente" });
+});
+
+test("una risposta Telegram HTTP 200 senza esito esplicito non viene ritentata", async () => {
+  const { state } = await fixture();
+  await enqueue(state, "audit", "resoconto", "Risultato", "audit", "wake-report");
+  let calls = 0;
+  const channel = new TelegramChannel("0:fake", "42", (async () => {
+    calls++;
+    return Response.json({ result: { message_id: 1 } });
+  }) as typeof fetch);
+  await flushNotifications(state, channel, redact);
+  await flushNotifications(new State(state.root), channel, redact);
+  expect(calls).toBe(1);
+  expect(await state.read(`outbox/${outboxId("resoconto", "audit")}.json`)).toMatchObject({
+    deliveryStatus: "DELIVERY_UNKNOWN", attempts: 1,
+  });
 });

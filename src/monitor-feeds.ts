@@ -14,7 +14,7 @@ export const freshness = {spot:15, forex:30, futures:20, crypto:20, equity:30, i
 export type Quote = { symbol: string; regularMarketPrice: number; regularMarketTime: number; regularMarketVolume?: number;
   regularMarketPreviousClose?: number; regularMarketVwap?: number; regularMarketDayHigh?: number; regularMarketDayLow?: number;
   exchangeDataDelayedBy?: number; marketState?: string; expireDate?: number; currency?: string; provider?: string;
-  responseAt?:string; sessionStart?: number; sessionEnd?: number; exchange?: string; instrumentType?: string; continuous?: boolean; bid?: number; ask?: number; observationDate?: string };
+  responseAt?:string; receivedAt?:string; sessionStart?: number; sessionEnd?: number; exchange?: string; instrumentType?: string; continuous?: boolean; bid?: number; ask?: number; observationDate?: string };
 const spotTickers:Record<string,string>={"XAU/USD":"XAUUSD=X","XAG/USD":"XAGUSD=X","EUR/USD":"EURUSD=X","GBP/USD":"GBPUSD=X","USD/JPY":"JPY=X"};
 function weekendClosed(now=new Date()) {
   const ny=newYork(now);
@@ -46,7 +46,7 @@ export class MonitorFeeds {
     });
   }
   async forex(pair: string, interval: "15min"|"1h"|"1day", priority=this.priority) {
-    if (!pairs.includes(pair)) throw new Error("Coppia sconosciuta");
+    if (!pairs.includes(pair) && pair!=="XAU/USD") throw new Error("Coppia sconosciuta");
     const key = await secret("TWELVE_DATA_API_KEY");
     return cached(this.state,"twelve",pair+interval, interval === "1day" ? 6*3600000 : interval === "1h" ? 3600000 : 15*mins,async () => {
       const url = new URL("https://api.twelvedata.com/time_series");
@@ -118,8 +118,9 @@ export class MonitorFeeds {
       const quote = data.data ?? data;
       const at = typeof quote.timestamp==="number" ? (quote.timestamp>1e12 ? quote.timestamp/1000 : quote.timestamp) : Date.parse(quote.timestamp)/1000;
       const responseAt=Date.parse(quote.updatedAt ?? data.updatedAt);
-      if (![metal,symbol].includes(quote.symbol ?? quote.metal) || quote.currency !== "USD" || !positive(quote.price) || (!positive(at) && !Number.isFinite(responseAt))) throw new FeedFailure(0);
+      if (![metal,symbol].includes(quote.symbol ?? quote.metal) || quote.currency !== "USD" || !positive(quote.price)) throw new FeedFailure(0);
       return {symbol,provider:"goldApi.dev",regularMarketPrice:quote.price,regularMarketTime:positive(at)?at:0,responseAt:Number.isFinite(responseAt)?new Date(responseAt).toISOString():undefined,currency:"USD",
+        receivedAt:new Date().toISOString(),
         bid:positive(quote.bid) ? quote.bid : undefined, ask:positive(quote.ask) ? quote.ask : undefined};
     },80,Number(process.env.GOLDAPI_DAILY_LIMIT ?? Infinity),{priority:this.priority && symbol==="XAU/USD",fresh:this.verifyDirect,cacheOnly:!this.verifyDirect && weekendClosed()});
   }
